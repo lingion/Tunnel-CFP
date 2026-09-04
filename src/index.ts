@@ -21,7 +21,7 @@ export default {
       return handleWebProxy(request);
     }
     if (url.pathname.startsWith("/sub/")) {
-      return handleSubscription(request);
+      return handleSubscription(request, env);
     }
     return edgetunnel.fetch(request, env, ctx);
   },

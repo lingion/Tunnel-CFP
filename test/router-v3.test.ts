@@ -1,7 +1,21 @@
 // test/router-v3.test.ts
 // v3 router分流测试（DoH/Web Proxy/Subscription + edgetunnel fallback）
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { encode } from 'dns-packet';
 import worker from '../src/index';
+
+const mockDnsResponse = encode({
+  id: 0,
+  type: 'response',
+  flags: 0x8180,
+  questions: [{ type: 'A', name: 'example.com', class: 'IN' }],
+  answers: [{ type: 'A', name: 'example.com', class: 'IN', ttl: 60, data: '93.184.216.34' }],
+});
+
+beforeEach(() => {
+  // Mock global fetch to return a valid DNS response
+  globalThis.fetch = vi.fn(async () => new Response(mockDnsResponse, { status: 200 })) as any;
+});
 
 const env = {
   cfp_KV: {} as KVNamespace,
