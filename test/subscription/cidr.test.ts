@@ -51,19 +51,23 @@ describe('ipInCidr membership', () => {
   });
 });
 
-describe('generateOptimizedNodes region bucketing', () => {
-  // 内置 CIDR 应当覆盖至少六个 region：APAC / NA / LATAM / EU / AF / OC
-  const REGION_RE = /^(APAC|NA|EU|LATAM|AF|OC)$/;
+describe('generateOptimizedNodes colo bucketing', () => {
+  // 命名语义改为实测落地机房 colo(2026-09-04 从家宽 111.43.134.102 实测 25 段):
+  //   HKG = 104.16/17/18/19 大段 + 172.66/22 · LAX = 8.35.211 + 8.39.125 + 91.193.58
+  //   SEA = 188.164.248 + 104.26/20 + 172.67.64/20
+  //   废段(对自用 host 报 1034,不可用)已剔除:162.159.32/20 · 162.159.38/23 ·
+  //   108.162.198/24 · 198.41.208/23
+  const COLO_RE = /^(HKG|LAX|SEA)$/;
 
-  it('produces 64 nodes by default (PoP-weighted: APAC24 / NA16 / EU16 / LATAM4 / AF2 / OC2)', () => {
+  it('produces 64 nodes by default', () => {
     const nodes = generateOptimizedNodes({});
     expect(nodes.length).toBe(64);
   });
 
-  it('every node name starts with CF-{REGION}-', () => {
+  it('every node name starts with CF-{COLO}-', () => {
     const nodes = generateOptimizedNodes({});
     for (const n of nodes) {
-      expect(n.name).toMatch(/^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/);
+      expect(n.name).toMatch(/^CF-(HKG|LAX|SEA)-\d+$/);
     }
   });
 
@@ -85,20 +89,25 @@ describe('generateOptimizedNodes region bucketing', () => {
     }
   });
 
-  it('region distribution matches the configured weights (PoP-weighted)', () => {
+  it('colo distribution matches measured landing (HKG 40 / LAX 12 / SEA 12)', () => {
     const nodes = generateOptimizedNodes({});
-    const counts: Record<Region, number> = { APAC: 0, NA: 0, EU: 0, LATAM: 0, AF: 0, OC: 0 };
+    const counts: Record<string, number> = { HKG: 0, LAX: 0, SEA: 0 };
     for (const n of nodes) {
-      const region = n.name.split('-')[1] as Region;
-      expect(REGION_RE.test(region)).toBe(true);
-      counts[region]++;
+      const colo = n.name.split('-')[1]!;
+      expect(COLO_RE.test(colo)).toBe(true);
+      counts[colo] = (counts[colo] ?? 0) + 1;
     }
-    expect(counts.APAC).toBe(24);
-    expect(counts.NA).toBe(16);
-    expect(counts.EU).toBe(16);
-    expect(counts.LATAM).toBe(4);
-    expect(counts.AF).toBe(2);
-    expect(counts.OC).toBe(2);
+    expect(counts.HKG).toBe(40);
+    expect(counts.LAX).toBe(12);
+    expect(counts.SEA).toBe(12);
+  });
+
+  it('dead CIDRs (error 1034 for our host) are excluded from the pool', () => {
+    const nodes = generateOptimizedNodes({ count: 200 });
+    for (const n of nodes) {
+      // 这些段对 cfp host 报 1034——出现在池里=废节点
+      expect(ipInCidr(n.server, parseCidrText('162.159.32.0/20\n162.159.38.0/23\n108.162.198.0/24\n198.41.208.0/23'))).toBe(false);
+    }
   });
 
   it('honors custom count override', () => {

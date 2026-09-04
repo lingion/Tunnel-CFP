@@ -5,7 +5,7 @@
 //   /sub/all        → 治理后的 Clash YAML：剥假 CN + 注入 geoip 命名自研节点
 import * as yaml from 'js-yaml';
 import { mergeSubscriptionPayloads } from './merge';
-import { getGeoNamedNodes, resolveGeoCountries } from './geo';
+import { getGeoNamedNodes } from './geo';
 import { type OptimizedNode } from './cidr';
 import { md5md5 } from './md5';
 import type { ProxyDef } from './types';
@@ -42,7 +42,7 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
 
     if (path === '/sub/edgetunnel') {
       // V2RayNG 链接：vendor base64 列表先走同一套治理（merge 规范化 → 剥假 CN），
-      // 再反向导出 base64 vless 列表（保持客户端形态），追加 geoip 命名自研节点
+      // 再反向导出 base64 vless 列表（保持客户端形态），追加实测落地 colo 命名自研节点
       const geoNodes = await getGeoNamedNodes(env, ctx, url.host);
       const merged = mergeSubscriptionPayloads([etText, optimizedNodesToYaml(geoNodes)]);
       const cleaned = stripFakeCountryNodes(merged);

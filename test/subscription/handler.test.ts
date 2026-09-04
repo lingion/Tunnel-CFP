@@ -199,7 +199,7 @@ it('filters fake-CN nodes and injects region-bucketed optimized nodes', async ()
     expect(text).not.toMatch(/^\s*-\s*CF(移动|联通|电信|官方)优选/m);
 
     // 自研 region 节点出现
-    const regionNodes = names.filter((n: string) => /^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/.test(n));
+    const regionNodes = names.filter((n: string) => /^CF-(HKG|LAX|SEA)-\d+$/.test(n));
     expect(regionNodes.length).toBeGreaterThan(0);
   });
 
@@ -254,6 +254,6 @@ describe('/sub/edgetunnel geo treatment (V2RayNG base64 output)', () => {
     // 假 CN 节点被剥掉
     expect(names.some((n) => /CF(移动|联通|电信|官方)优选/.test(n))).toBe(false);
     // 自研 geo 节点在（geo mock 空 → 回退区域桶名）
-    expect(names.some((n) => /^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/.test(n))).toBe(true);
+    expect(names.some((n) => /^CF-(HKG|LAX|SEA)-\d+$/.test(n))).toBe(true);
   });
 });

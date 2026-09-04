@@ -3,16 +3,16 @@
 // 但 CF edge IP 是 anycast，根本无国家级归属——这是误导信息。
 // 现改成：内置 CF 公开 CIDR + 按 CF PoP 数量加权分桶，按"region"诚实标注。
 // Region 定义参考 cloudflarestatus.com/api/v2/components.json 351 PoP 分布（截止 2026-09）：
-//   APAC  ~110 PoP · NA ~95 · EU ~85 · LATAM ~30 · AF ~20 · OC ~11（合计 351）
+//   2026-09-04 改为家宽实测落地 colo:HKG(104.x 大段+172.66) / LAX(8.35/8.39/91.193) / SEA(188.164/104.26/172.67)
 // 不做实时探测/外网请求——确定性、可缓存、可测试。
-export type Region = 'APAC' | 'NA' | 'EU' | 'LATAM' | 'AF' | 'OC';
+export type Region = 'HKG' | 'LAX' | 'SEA';
 
 export interface CidrEntry {
   cidr: string;
 }
 
 export interface OptimizedNode {
-  name: string;       // CF-{REGION}-{idx}
+  name: string;       // CF-{COLO}-{idx}
   server: string;     // IPv4
   port: number;
   uuid: string;
@@ -29,19 +29,16 @@ export interface OptimizedNode {
 export interface OptimizeOpts {
   uuid?: string;             // 默认 '00000000-0000-4000-8000-000000000000'（vendor 占位符）
   sni?: string;              // 默认 'cfp.qdp.qzz.io'
-  count?: number;            // 默认 64（APAC24/NA16/EU16/LATAM4/AF2/OC2 PoP 加权）
+  count?: number;            // 默认 64（实测落地加权 HKG40/LAX12/SEA12）
   path?: string;             // 默认 '/'
   cidrText?: string;         // 自定义 CIDR 文本（测试用）
 }
 
 // 默认 CIDR：直接从 cmliu/CF-CIDR.txt 同步（2026-09 拉取，24 段）。
 // 内置以便离线/可缓存；如需更新见 cmliu/cmliu 的 main 分支。
-const DEFAULT_CF_CIDR = `162.159.32.0/20
-8.35.211.0/24
+const DEFAULT_CF_CIDR = `8.35.211.0/24
 8.39.125.0/24
 188.164.248.0/24
-108.162.198.0/24
-162.159.38.0/23
 91.193.58.0/23
 172.66.0.0/22
 104.16.144.0/20
@@ -58,13 +55,12 @@ const DEFAULT_CF_CIDR = `162.159.32.0/20
 104.19.32.0/22
 104.19.48.0/21
 104.19.144.0/21
-198.41.208.0/23
 104.26.0.0/20
 172.67.64.0/20`;
 
-// 默认 region 桶权重：APAC24 / NA16 / EU16 / LATAM4 / AF2 / OC2 = 64
+// colo 权重(实测落地占比:HKG 段总空间最大,占大头;LAX 3 段;SEA 3 段)= 64 节点
 const DEFAULT_WEIGHTS: Record<Region, number> = {
-  APAC: 24, NA: 16, EU: 16, LATAM: 4, AF: 2, OC: 2,
+  HKG: 40, LAX: 12, SEA: 12,
 };
 
 // CF 公开端口池（vendor 一致：[443, 2053, 2083, 2087, 2096, 8443]）
@@ -72,44 +68,34 @@ const CF_PORTS = [443, 2053, 2083, 2087, 2096, 8443] as const;
 
 // 把 CIDR 段按"已知 region 标签"分配——CF 公开段大部分 anycast，
 // 但通过手工划分（参照 CF PoP 实际所在 + 公开 IP 段公开归属文档），足够"不骗人"。
-// 没把握的段就当 APAC（CF 亚太边缘在全球占比最大）。
+// 没匹配到的段归 HKG（104.x 主力段所在）。
+// 废段(对自用 host 报 1034)不入池:162.159.32/20 · 162.159.38/23 · 108.162.198/24 · 198.41.208/23
 const CIDR_BUCKETS: Record<string, Region> = {
-  // APAC（占比最大，含新加坡/东京/香港/悉尼/首尔 PoP 接入段）
-  '162.159.32.0/20': 'APAC',
-  '8.35.211.0/24': 'APAC',
-  '108.162.198.0/24': 'APAC',
-  '162.159.38.0/23': 'APAC',
-  '91.193.58.0/23': 'APAC',  // 91.193.x 在欧洲也有，但 cmliu 列入主入口段
-  '104.16.144.0/20': 'APAC',
-  '104.17.16.0/20': 'APAC',
-  '104.17.48.0/20': 'APAC',
-  '104.17.96.0/20': 'APAC',
-  '104.17.112.0/20': 'APAC',
-  '104.17.144.0/20': 'APAC',
-  '104.17.160.0/20': 'APAC',
-  '104.17.176.0/20': 'APAC',
-  '104.17.208.0/20': 'APAC',
-  '104.19.144.0/21': 'APAC',
-
-  // NA（北美：美/加/墨西哥 PoP 接入段）
-  '104.16.240.0/20': 'NA',
-  '104.18.33.0/24': 'NA',
-  '198.41.208.0/23': 'NA',
-
-  // EU（欧洲：欧盟/英国 PoP 接入段）
-  '188.164.248.0/24': 'EU',
-  '8.39.125.0/24': 'EU',
-
-  // LATAM（南美：圣保罗/布宜诺斯艾利斯 PoP 接入段）
-  '104.19.32.0/22': 'LATAM',
-  '104.19.48.0/21': 'LATAM',
-
-  // AF（非洲：约翰内斯堡/开罗 PoP 接入段）
-  '172.66.0.0/22': 'AF',
-
-  // OC（大洋洲：悉尼/奥克兰 PoP 接入段——重用部分 APAC 段）
-  '104.26.0.0/20': 'OC',
-  '172.67.64.0/20': 'OC',
+  // 2026-09-04 家宽(111.43.134.102, China Mobile)实测落地 colo,curl --resolve + /cdn-cgi/trace
+  // HKG:104.x 大段 + 172.66/22 全部落香港
+  '104.16.144.0/20': 'HKG',
+  '104.16.240.0/20': 'HKG',
+  '104.17.16.0/20': 'HKG',
+  '104.17.48.0/20': 'HKG',
+  '104.17.96.0/20': 'HKG',
+  '104.17.112.0/20': 'HKG',
+  '104.17.144.0/20': 'HKG',
+  '104.17.160.0/20': 'HKG',
+  '104.17.176.0/20': 'HKG',
+  '104.17.208.0/20': 'HKG',
+  '104.18.33.0/24': 'HKG',
+  '104.19.32.0/22': 'HKG',
+  '104.19.48.0/21': 'HKG',
+  '104.19.144.0/21': 'HKG',
+  '172.66.0.0/22': 'HKG',
+  // LAX:这三个段落洛杉矶
+  '8.35.211.0/24': 'LAX',
+  '8.39.125.0/24': 'LAX',
+  '91.193.58.0/23': 'LAX',
+  // SEA:这三个段落西雅图
+  '188.164.248.0/24': 'SEA',
+  '104.26.0.0/20': 'SEA',
+  '172.67.64.0/20': 'SEA',
 };
 
 // 解析 CIDR 文本为 CidrEntry[]
@@ -196,14 +182,14 @@ export function generateOptimizedNodes(opts: OptimizeOpts = {}): OptimizedNode[]
 
   // 按 region 桶分组
   const byRegion: Record<Region, string[]> = {
-    APAC: [], NA: [], EU: [], LATAM: [], AF: [], OC: [],
+    HKG: [], LAX: [], SEA: [],
   };
   for (const e of all) {
-    const region = CIDR_BUCKETS[e.cidr] ?? 'APAC';
+    const region = CIDR_BUCKETS[e.cidr] ?? 'HKG';
     byRegion[region].push(e.cidr);
   }
 
-  const regions: Region[] = ['APAC', 'NA', 'EU', 'LATAM', 'AF', 'OC'];
+  const regions: Region[] = ['HKG', 'LAX', 'SEA'];
   // 总权重
   const totalWeight = regions.reduce((s, r) => s + DEFAULT_WEIGHTS[r], 0);
 
