@@ -1,0 +1,19 @@
+name = "proxy"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# edgetunnel 不需要 DO；此处不声明。占位勿用——若 wrangler 校验报缺 DO 删除本段。
+# （DO 段已按 brief 裁定删除：wrangler dev 校验报 EdtUnsupportedDO 未从入口导出）
+
+# KV：面板配置存储
+[[kv_namespaces]]
+binding = "KV"
+id = "PLACEHOLDER_RUN_create_kv_first"
+
+[vars]
+# UUID 节点认证：部署时生成一次写入（非机密但应稳定）
+UUID = "01bae8c6-bd8f-4060-ac9e-4f7cfe561f34"
+
+[observability]
+enabled = true
