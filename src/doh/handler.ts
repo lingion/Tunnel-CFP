@@ -1,5 +1,13 @@
-// src/doh/handler.ts — DoH stub
-// TODO: 实装见 Task 5 (dns-packet + Worker Cache)
+// src/doh/handler.ts
+// 路由：
+//   /dns-query → RFC 8484 wire format (POST + GET)
+//   /resolve   → JSON-over-HTTPS 兼容接口
+import { handleRfc8484 } from './rfc8484';
+import { handleJsonApi } from './json-api';
+
 export async function handleDoh(request: Request): Promise<Response> {
-  return new Response('DoH stub', { status: 501 });
+  const url = new URL(request.url);
+  if (url.pathname === '/dns-query') return handleRfc8484(request);
+  if (url.pathname === '/resolve') return handleJsonApi(request);
+  return new Response('Not Found', { status: 404 });
 }
