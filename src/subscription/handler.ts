@@ -41,8 +41,8 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
     if (path === '/sub/edgetunnel') return new Response(etText, { headers: yamlHeaders });
     if (path === '/sub/yonggekkk') return new Response(ykText, { headers: yamlHeaders });
     if (path === '/sub/all') {
-      // /sub/all：过滤假国家段 + 注入自研 64 个 region 节点
-      const filtered = [stripFakeCountryNodes(etText), ykText];
+      // /sub/all：两个 vendor 输出都过滤假国家段 + 注入自研 64 个 region 节点
+      const filtered = [stripFakeCountryNodes(etText), stripFakeCountryNodes(ykText)];
       const optimizedYaml = optimizedNodesToYaml(generateOptimizedNodes({
         uuid: env.UUID,
         sni: url.host,
