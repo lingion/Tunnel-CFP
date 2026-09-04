@@ -1,5 +1,5 @@
 const HOP_BY_HOP_STRIP = [
-  "host", "content-length", "accept-encoding", "x-api-key",
+  "host", "content-length", "accept-encoding",
 ];
 
 export class BadTargetError extends Error {

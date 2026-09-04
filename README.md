@@ -50,14 +50,17 @@ curl -H "X-API-Key: $AGENT_KEY" https://proxy.qdp.qzz.io/api/v1/fetch/https://ex
 curl -N -H "X-API-Key: $AGENT_KEY" "https://proxy.qdp.qzz.io/api/v1/fetch/https://httpbin.org/drip?duration=3&numbytes=3"
 ```
 
-Claude Code 环境变量法（把 ANTHROPIC_BASE_URL 指到本地反向代理时，同款思路用 fetch 端点转发 Anthropic API）：
+Claude Code 环境变量法（可工作的配置）。Claude Code 不发 `X-API-Key` 头，所以网关鉴权 key 走 `?key=` query 拼进 BASE_URL；`x-api-key`/`authorization` 等请求头原样透传给上游（Claude Code 发的鉴权头直接到达 Anthropic）：
 
 ```bash
-export ANTHROPIC_BASE_URL="https://proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com"
-export ANTHROPIC_AUTH_TOKEN="<你的上游token>"
-# 客户端请求 https://api.anthropic.com/v1/messages
-# → 经 https://proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com/v1/messages 转发，流式直通
+source ~/.proxy-secrets.env
+export ANTHROPIC_BASE_URL="https://proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com?key=$AGENT_KEY"
+export ANTHROPIC_AUTH_TOKEN="<上游 Anthropic key>"
+# 客户端请求 → proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com/v1/messages
+# 网关校验 ?key= → 剥离 → 转发 https://api.anthropic.com/v1/messages（带 Claude Code 原有鉴权头），流式直通
 ```
+
+注：网关自身鉴权接受 `?key=` 时，该参数在拼目标 URL 阶段被剥离（`buildTargetUrl` 排除 `key`），不会泄给上游。
 
 服务自述：`GET /api/v1`（无鉴权）返回 endpoints 列表；`GET /api/v1/health` 返回健康状态。
 

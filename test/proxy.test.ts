@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { sanitizeRequestHeaders, buildTargetUrl, forward, BadTargetError } from "../src/gateway/proxy";
 
 describe("sanitizeRequestHeaders", () => {
-  it("strips host, cf-*, x-forwarded-*, x-api-key, content-length, accept-encoding", () => {
+  it("strips host, cf-*, x-forwarded-*, content-length, accept-encoding; passes x-api-key through (upstream credential)", () => {
     const h = new Headers({
       "Host": "proxy.qdp.qzz.io",
       "CF-Connecting-IP": "1.2.3.4",
@@ -17,7 +17,7 @@ describe("sanitizeRequestHeaders", () => {
     expect(out.get("host")).toBeNull();
     expect(out.get("cf-connecting-ip")).toBeNull();
     expect(out.get("x-forwarded-for")).toBeNull();
-    expect(out.get("x-api-key")).toBeNull();
+    expect(out.get("x-api-key")).toBe("secret"); // 上游 API 凭据透传项，不再剔除
     expect(out.get("content-length")).toBeNull();
     expect(out.get("accept-encoding")).toBeNull();
     expect(out.get("authorization")).toBe("Bearer tk");
