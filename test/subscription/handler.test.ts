@@ -35,13 +35,19 @@ vi.mock('../../vendor/yonggekkk/_worker.js', () => ({
 }));
 
 import { handleSubscription } from '../../src/subscription/handler';
+import { md5md5 } from '../../src/subscription/md5';
+
+const TEST_UUID = 'test-uuid-1234';
+async function tokenFor(host: string): Promise<string> {
+  return md5md5(host + TEST_UUID);
+}
 
 describe('handleSubscription integration', () => {
-  const env = {} as Env;
+  const env = { UUID: TEST_UUID } as Env;
   const ctx = { waitUntil: (_p: Promise<unknown>) => {} } as unknown as ExecutionContext;
 
   it('/sub/edgetunnel returns vendor A YAML', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/edgetunnel'), env, ctx);
+    const res = await handleSubscription(new Request(`https://x.test/sub/edgetunnel?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('et1');
@@ -50,7 +56,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/yonggekkk returns vendor B YAML', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx);
+    const res = await handleSubscription(new Request(`https://x.test/sub/yonggekkk?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('yk1');
@@ -58,7 +64,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/all merges both vendors with deduplicated AUTO proxies', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/all'), env, ctx);
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('et1');
@@ -67,7 +73,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/unknown returns 404', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/unknown'), env, ctx);
+    const res = await handleSubscription(new Request(`https://x.test/sub/unknown?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(404);
   });
 
@@ -80,7 +86,7 @@ describe('handleSubscription integration', () => {
       default: { fetch: vi.fn(async () => new Response(ykYaml, { status: 200 })) },
     }));
     const { handleSubscription: handleSub2 } = await import('../../src/subscription/handler');
-    const res = await handleSub2(new Request('https://x.test/sub/edgetunnel'), env, { waitUntil: () => {} } as unknown as ExecutionContext);
+    const res = await handleSub2(new Request(`https://x.test/sub/edgetunnel?token=${await tokenFor('x.test')}`), env, { waitUntil: () => {} } as unknown as ExecutionContext);
     expect(res.status).toBe(500);
   });
 });
@@ -103,7 +109,7 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
     const { handleSubscription } = await import('../../src/subscription/handler');
     const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
     const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
-    const res = await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx2);
+    const res = await handleSubscription(new Request(`https://x.test/sub/yonggekkk?token=${await md5md5('x.test' + env.UUID)}`), env, ctx2);
     expect(res.status).toBe(200);
     expect(seenEnvs.length).toBe(1);
     expect(seenEnvs[0].uuid).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
@@ -127,7 +133,7 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
     const { handleSubscription } = await import('../../src/subscription/handler');
     const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
     const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
-    await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx2);
+    await handleSubscription(new Request(`https://x.test/sub/yonggekkk?token=${await md5md5('x.test' + env.UUID)}`), env, ctx2);
     expect(seenPaths[0]).toBe('/b88ab8fa-392c-44b3-9343-612c11814708/cl');
   });
 });

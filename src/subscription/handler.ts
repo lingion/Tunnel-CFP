@@ -10,6 +10,14 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // token 鉴权：token=MD5MD5(host+UUID)，与 vendor edgetunnel 订阅 token 同源。
+  // 节点里的 UUID 本身就是连接凭证，订阅裸奔=泄露凭证。
+  const token = url.searchParams.get('token');
+  const expected = await md5md5(url.host + env.UUID);
+  if (!token || token !== expected) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
   try {
     // 动态 import vendor（避免 SSR/Node 测试环境装载）
     const edgetunnelMod = await import('../../vendor/edgetunnel/_worker.js');
