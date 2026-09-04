@@ -1,0 +1,23 @@
+name = "proxy"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Object: WebSocket 边 + TCP 桥接连接池宿主
+[[durable_objects.bindings]]
+name = "BRIDGE"
+class_name = "BridgeDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BridgeDO"]
+
+# Agent 调用密钥（部署时用 secret 填充，勿写明文）
+[vars]
+ALLOWED_ORIGINS = "*"
+
+[observability]
+enabled = true
+
+[limits]
+cpu_ms = 30000
