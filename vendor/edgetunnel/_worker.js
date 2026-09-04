@@ -5878,6 +5878,11 @@ async function 生成随机IP(request, count = 16, 指定端口 = -1) {
 	};
 	const cidr_url = 运营商文件标识 === 'cf' ? `https://raw.githubusercontent.com/${特征码字典[1]}/${特征码字典[1]}/main/CF-CIDR.txt` : `https://raw.githubusercontent.com/${特征码字典[1]}/${特征码字典[1]}/main/CF-CIDR/${运营商文件标识}.txt`;
 	const cfname = 运营商名称映射[运营商文件标识] || 'CF官方优选';
+	// 定制: 取请求客户端国家码 + ASN, 用于命名节点归属信息
+	const 请求国家码 = (request.cf && request.cf.country) ? String(request.cf.country).toUpperCase() : 'XX';
+	const 请求ASN = (request.cf && request.cf.asn) ? String(request.cf.asn) : '0';
+	// 定制: 命名格式 运营商名-国家码-ASN
+	const cfnameGeo = `${cfname}-${请求国家码}-${请求ASN}`;
 	const cfport = [443, 2053, 2083, 2087, 2096, 8443];
 	let cidrList = [];
 	try { const res = await fetch(cidr_url); cidrList = res.ok ? await 整理成数组(await res.text()) : ['104.16.0.0/13'] } catch { cidrList = ['104.16.0.0/13'] }
@@ -5894,7 +5899,7 @@ async function 生成随机IP(request, count = 16, 指定端口 = -1) {
 		const 目标端口 = 指定端口 === -1
 			? cfport[Math.floor(Math.random() * cfport.length)]
 			: 指定端口;
-		return `${ip}:${目标端口}#${cfname}${index + 1}`;
+		return `${ip}:${目标端口}#${cfnameGeo}${index + 1}`;
 	});
 	return [randomIPs, randomIPs.join('\n')];
 }
