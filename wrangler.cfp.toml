@@ -3,14 +3,18 @@ main = "src/index.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
+# 自定义域名：cfp.qdp.qzz.io（与 proxy.qdp.qzz.io 同家族，绕过 workers.dev 国内被墙）
+routes = [
+  { pattern = "cfp.qdp.qzz.io", custom_domain = true }
+]
+
 # cfp Worker — v3 新部署目标
 # 与原 proxy worker 共用 CF account (07401407fe88e9e8ce61d54ea0e385f3)
-# 默认 URL: https://cfp.lingion04.workers.dev (wrangler 部署后给出)
-# 用户后续可在 CF Dashboard 添加自定义域名（v3 不预设）
 
 # KV：v3 独立 KV namespace（与原 worker 的 314b603009c74d67995937477c8e603a 不共享）
+# vendor edgetunnel 硬编码 env.KV，所以 binding 必须叫 "KV"
 [[kv_namespaces]]
-binding = "cfp_KV"
+binding = "KV"
 id = "e724e1591a33423ea603114a42f65984"
 
 [vars]

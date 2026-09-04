@@ -3,9 +3,10 @@
 //   /sub/edgetunnel → vendor edgetunnel YAML
 //   /sub/yonggekkk  → vendor yonggekkk YAML（通用格式）
 //   /sub/all        → 两者合并
-import { mergeYaml } from './merge';
+import { mergeSubscriptionPayloads } from './merge';
+import { md5md5 } from './md5';
 
-export async function handleSubscription(request: Request, env: Env): Promise<Response> {
+export async function handleSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -16,13 +17,13 @@ export async function handleSubscription(request: Request, env: Env): Promise<Re
     const edgetunnel = edgetunnelMod.default;
     const yonggekkk = yonggekkkMod.default;
 
-    // 构造 vendor 用的子请求：移除 /sub/* 路径，让 vendor 走自己的订阅路径
-    const subUrl = new URL(request.url);
-    subUrl.pathname = '/sub';
+    // 每个 vendor 各自构造 URL（并发改同一 URL 会互相覆盖）
+    const etUrl = new URL(request.url);
+    const ykUrl = new URL(request.url);
 
     const [etText, ykText] = await Promise.all([
-      fetchVendorYaml(edgetunnel, subUrl, request, env, 'edgetunnel'),
-      fetchVendorYaml(yonggekkk, subUrl, request, env, 'yonggekkk'),
+      fetchVendorYaml(edgetunnel, etUrl, request, env, ctx, 'edgetunnel'),
+      fetchVendorYaml(yonggekkk, ykUrl, request, env, ctx, 'yonggekkk'),
     ]);
 
     const yamlHeaders = { 'Content-Type': 'text/yaml; charset=utf-8' };
@@ -30,7 +31,7 @@ export async function handleSubscription(request: Request, env: Env): Promise<Re
     if (path === '/sub/edgetunnel') return new Response(etText, { headers: yamlHeaders });
     if (path === '/sub/yonggekkk') return new Response(ykText, { headers: yamlHeaders });
     if (path === '/sub/all') {
-      const merged = mergeYaml([etText, ykText]);
+      const merged = mergeSubscriptionPayloads([etText, ykText]);
       return new Response(merged, { headers: yamlHeaders });
     }
 
@@ -45,10 +46,32 @@ async function fetchVendorYaml(
   subUrl: URL,
   originalRequest: Request,
   env: Env,
+  ctx: ExecutionContext,
   name: string
 ): Promise<string> {
-  const subReq = new Request(subUrl.toString(), originalRequest);
-  const res = await vendor.fetch(subReq, env, {} as ExecutionContext);
+  const userID = env.UUID;
+
+  // 传给 vendor 的请求：固定 UA 为 "CF-Workers-SUB" 触发本地生成（避免 vendor 走远端 subconverter）
+  // target=mixed 强制 edgetunnel 走本地 VLESS 节点生成分支
+  const headers = new Headers(originalRequest.headers);
+  headers.set('User-Agent', 'CF-Workers-SUB');
+
+  if (name === 'edgetunnel') {
+    // edgetunnel: /sub?token=MD5MD5(host+userID)&target=mixed
+    subUrl.pathname = '/sub';
+    const token = await md5md5(subUrl.host + userID);
+    subUrl.searchParams.set('token', token);
+    subUrl.searchParams.set('target', 'mixed');
+  } else if (name === 'yonggekkk') {
+    // yonggekkk: /${userID}/cl 返回 Clash base64
+    subUrl.pathname = `/${userID}/cl`;
+  }
+
+  const subReq = new Request(subUrl.toString(), { method: 'GET', headers, cf: originalRequest.cf });
+  // yonggekkk vendor 读小写 env.uuid（_worker.js:63 `userID = env.uuid || userID`），
+  // wrangler 绑定的是大写 UUID —— 不补小写视图会回退 vendor 硬编码 UUID，/${userID}/cl 永不命中
+  const vendorEnv = name === 'yonggekkk' ? { ...env, uuid: userID } : env;
+  const res = await vendor.fetch(subReq, vendorEnv, ctx);
   if (!res.ok) {
     throw new Error(`Vendor ${name} returned ${res.status}`);
   }

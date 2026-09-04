@@ -24,7 +24,7 @@ function base64urlDecode(str: string): Uint8Array {
   return new Uint8Array([...binary].map((c) => c.charCodeAt(0)));
 }
 
-export async function handleRfc8484(request: Request): Promise<Response> {
+export async function handleRfc8484(request: Request, ctx: ExecutionContext): Promise<Response> {
   let wireQuery: Uint8Array;
 
   if (request.method === 'POST') {
@@ -69,8 +69,8 @@ export async function handleRfc8484(request: Request): Promise<Response> {
   const responseBytes = new Uint8Array(await upstream.arrayBuffer());
   // Return as-is (wire format is binary)
 
-  // Cache result
-  await putCachedResponse({} as ExecutionContext, wireQuery, responseBytes);
+  // Cache result（真实 ctx —— {} 冒充会在 cache.put 的 waitUntil 上炸 1101）
+  await putCachedResponse(ctx, wireQuery, responseBytes);
 
   return new Response(responseBytes, {
     status: upstream.status,

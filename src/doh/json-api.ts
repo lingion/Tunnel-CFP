@@ -44,12 +44,56 @@ export async function handleJsonApi(request: Request): Promise<Response> {
   // 退化：若 Buffer 可用则 wrap，否则降级为直接传 Uint8Array（dns-packet v5+ 支持）
   const decoded = decode(Buffer.from(responsePacket.buffer, responsePacket.byteOffset, responsePacket.byteLength));
 
-  return new Response(JSON.stringify(decoded), {
+  return new Response(JSON.stringify(toGoogleContract(decoded)), {
     headers: {
       'Content-Type': 'application/dns-json',
       'Cache-Control': `max-age=${DOH_CACHE_TTL_SECONDS}`,
     },
   });
+}
+
+// dns-packet 的 decode 输出（rcode/answers/type:"A"）映射为 Cloudflare/Google JSON
+// 事实标准字段：Status(数值RCODE)/Answer(大写A,数值type)/TTL/name 尾点
+// type 数值表（RFC 1035/3596/2782）：A=1 CNAME=5 NS=2 TXT=16 MX=15 AAAA=28 SRV=33
+const RR_TYPE_NUM: Record<string, number> = { A: 1, NS: 2, CNAME: 5, TXT: 16, MX: 15, AAAA: 28, SRV: 33 };
+const RCODE_NUM: Record<string, number> = {
+  NOERROR: 0, FORMERR: 1, SERVFAIL: 2, NXDOMAIN: 3, NOTIMP: 4, REFUSED: 5,
+};
+
+function toGoogleContract(decoded: any): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    Status: RCODE_NUM[decoded.rcode] ?? 2, // 未知 rcode 按 SERVFAIL 处理，fail-visible
+    TC: Boolean(decoded.flag_tc),
+    RD: Boolean(decoded.flag_rd),
+    RA: Boolean(decoded.flag_ra),
+    AD: Boolean(decoded.flag_ad),
+    CD: Boolean(decoded.flag_cd),
+  };
+  if (decoded.questions) {
+    out.Question = decoded.questions.map((q: any) => ({
+      name: dotName(q.name),
+      type: RR_TYPE_NUM[q.type] ?? q.type,
+    }));
+  }
+  const answer = (decoded.answers || []).map((a: any) => ({
+    name: dotName(a.name),
+    type: RR_TYPE_NUM[a.type] ?? a.type,
+    TTL: a.ttl ?? 0,
+    data: String(a.data),
+  }));
+  if (answer.length) out.Answer = answer;
+  const authority = (decoded.authorities || []).map((a: any) => ({
+    name: dotName(a.name),
+    type: RR_TYPE_NUM[a.type] ?? a.type,
+    TTL: a.ttl ?? 0,
+    data: typeof a.data === 'object' ? JSON.stringify(a.data) : String(a.data ?? ''),
+  }));
+  if (authority.length) out.Authority = authority;
+  return out;
+}
+
+function dotName(name: string): string {
+  return name.endsWith('.') ? name : `${name}.`;
 }
 
 function jsonError(status: number, message: string): Response {

@@ -38,9 +38,10 @@ import { handleSubscription } from '../../src/subscription/handler';
 
 describe('handleSubscription integration', () => {
   const env = {} as Env;
+  const ctx = { waitUntil: (_p: Promise<unknown>) => {} } as unknown as ExecutionContext;
 
   it('/sub/edgetunnel returns vendor A YAML', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/edgetunnel'), env);
+    const res = await handleSubscription(new Request('https://x.test/sub/edgetunnel'), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('et1');
@@ -49,7 +50,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/yonggekkk returns vendor B YAML', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env);
+    const res = await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('yk1');
@@ -57,7 +58,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/all merges both vendors with deduplicated AUTO proxies', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/all'), env);
+    const res = await handleSubscription(new Request('https://x.test/sub/all'), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('et1');
@@ -66,7 +67,7 @@ describe('handleSubscription integration', () => {
   });
 
   it('/sub/unknown returns 404', async () => {
-    const res = await handleSubscription(new Request('https://x.test/sub/unknown'), env);
+    const res = await handleSubscription(new Request('https://x.test/sub/unknown'), env, ctx);
     expect(res.status).toBe(404);
   });
 
@@ -79,7 +80,54 @@ describe('handleSubscription integration', () => {
       default: { fetch: vi.fn(async () => new Response(ykYaml, { status: 200 })) },
     }));
     const { handleSubscription: handleSub2 } = await import('../../src/subscription/handler');
-    const res = await handleSub2(new Request('https://x.test/sub/edgetunnel'), env);
+    const res = await handleSub2(new Request('https://x.test/sub/edgetunnel'), env, { waitUntil: () => {} } as unknown as ExecutionContext);
     expect(res.status).toBe(500);
+  });
+});
+// 回归：yonggekkk vendor 读小写 env.uuid；不传小写视图则回退硬编码 UUID，/${userID}/cl 分支永不命中
+describe('vendor env casing (yonggekkk lowercase uuid)', () => {
+  it('passes lowercase uuid view to yonggekkk vendor', async () => {
+    vi.resetModules();
+    const seenEnvs: any[] = [];
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: {
+        fetch: vi.fn(async (_req: Request, env: any) => {
+          seenEnvs.push(env);
+          return new Response('proxies:\n- name: yknode', { status: 200 });
+        }),
+      },
+    }));
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx2);
+    expect(res.status).toBe(200);
+    expect(seenEnvs.length).toBe(1);
+    expect(seenEnvs[0].uuid).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
+    expect(seenEnvs[0].UUID).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
+  });
+
+  it('requests the vendor path with the real UUID (not vendor hardcoded)', async () => {
+    vi.resetModules();
+    const seenPaths: string[] = [];
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: {
+        fetch: vi.fn(async (req: Request) => {
+          seenPaths.push(new URL(req.url).pathname);
+          return new Response('proxies:\n- name: yknode', { status: 200 });
+        }),
+      },
+    }));
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    await handleSubscription(new Request('https://x.test/sub/yonggekkk'), env, ctx2);
+    expect(seenPaths[0]).toBe('/b88ab8fa-392c-44b3-9343-612c11814708/cl');
   });
 });

@@ -15,13 +15,13 @@ export default {
       return handleGateway(request, env, ctx);
     }
     if (url.pathname === "/dns-query" || url.pathname === "/resolve") {
-      return handleDoh(request);
+      return handleDoh(request, ctx);
     }
     if (url.pathname.startsWith("/proxy/")) {
       return handleWebProxy(request);
     }
     if (url.pathname.startsWith("/sub/")) {
-      return handleSubscription(request, env);
+      return handleSubscription(request, env, ctx);
     }
     return edgetunnel.fetch(request, env, ctx);
   },

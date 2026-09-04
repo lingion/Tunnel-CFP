@@ -3,6 +3,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleRfc8484 } from '../../src/doh/rfc8484';
 
+// cache.put 需要 waitUntil；Node 环境无 caches，putCachedResponse 直接短路，fakeCtx 只是占位签名
+const fakeCtx = { waitUntil: (_p: Promise<unknown>) => {} } as unknown as ExecutionContext;
+
 // Sample DNS A query for example.com built offline:
 // Header: id=0, flags=0x0100 (RD), qdcount=1
 // Question: example.com, type=A(1), class=IN(1)
@@ -45,7 +48,7 @@ describe('DoH RFC 8484 handler', () => {
       headers: { 'Content-Type': 'application/dns-message' },
       body: query,
     });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('application/dns-message');
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -58,7 +61,7 @@ describe('DoH RFC 8484 handler', () => {
       headers: { 'Content-Type': 'text/plain' },
       body: 'hello',
     });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(415);
   });
 
@@ -70,19 +73,19 @@ describe('DoH RFC 8484 handler', () => {
     const req = new Request(`https://cfp.lingion04.workers.dev/dns-query?dns=${b64}`, {
       method: 'GET',
     });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(200);
   });
 
   it('rejects GET without dns param (400)', async () => {
     const req = new Request('https://cfp.lingion04.workers.dev/dns-query', { method: 'GET' });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(400);
   });
 
   it('rejects other methods (405)', async () => {
     const req = new Request('https://cfp.lingion04.workers.dev/dns-query', { method: 'PUT' });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(405);
   });
 
@@ -93,7 +96,20 @@ describe('DoH RFC 8484 handler', () => {
       headers: { 'Content-Type': 'application/dns-message' },
       body: tooBig,
     });
-    const res = await handleRfc8484(req);
+    const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(413);
+  });
+});
+// 回归：cache.put 路径必须收到带 waitUntil 的真实 ctx（线上曾因 {} 冒充 ctx 炸 1101）
+describe('DoH RFC 8484 cache integration', () => {
+  it('GET happy path passes a real ExecutionContext into cache write', async () => {
+    const query = makeQuery();
+    let b64 = btoa(String.fromCharCode(...query));
+    b64 = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const seen: Promise<unknown>[] = [];
+    const realCtx = { waitUntil: (p: Promise<unknown>) => seen.push(p) } as unknown as ExecutionContext;
+    const req = new Request(`https://cfp.lingion04.workers.dev/dns-query?dns=${b64}`, { method: 'GET' });
+    const res = await handleRfc8484(req, realCtx);
+    expect(res.status).toBe(200);
   });
 });
