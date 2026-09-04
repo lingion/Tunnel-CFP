@@ -173,7 +173,7 @@ proxies:
     }));
   };
 
-  it('filters fake-CN nodes and injects region-bucketed optimized nodes', async () => {
+it('filters fake-CN nodes and injects region-bucketed optimized nodes', async () => {
     setupVendors();
     const { handleSubscription } = await import('../../src/subscription/handler');
     const env = { UUID: TEST_UUID } as unknown as Env;
@@ -182,9 +182,12 @@ proxies:
     const text = await res.text();
     const parsed: any = (await import('js-yaml')).load(text);
 
-    // 假国家节点全部消失
+    // 假国家节点全部消失（proxies 段）
     const names = parsed.proxies.map((p: any) => p.name);
     expect(names.some((n: string) => /CF(移动|联通|电信|官方)优选/.test(n))).toBe(false);
+
+    // proxy-groups 引用行也不能残留（悬空引用会让 Clash 报错）
+    expect(text).not.toMatch(/^\s*-\s*CF(移动|联通|电信|官方)优选/m);
 
     // 自研 region 节点出现
     const regionNodes = names.filter((n: string) => /^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/.test(n));

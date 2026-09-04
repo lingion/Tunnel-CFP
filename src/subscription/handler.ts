@@ -41,14 +41,15 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
     if (path === '/sub/edgetunnel') return new Response(etText, { headers: yamlHeaders });
     if (path === '/sub/yonggekkk') return new Response(ykText, { headers: yamlHeaders });
     if (path === '/sub/all') {
-      // /sub/all：两个 vendor 输出都过滤假国家段 + 注入自研 64 个 region 节点
-      const filtered = [stripFakeCountryNodes(etText), stripFakeCountryNodes(ykText)];
+      // /sub/all：先合并，再对最终 YAML 过滤假国家段（vendor 输出可能是 base64 vless 列表，
+      // 必须等 mergeSubscriptionPayloads 规范化成 Clash YAML 后才能按 name 过滤）
       const optimizedYaml = optimizedNodesToYaml(generateOptimizedNodes({
         uuid: env.UUID,
         sni: url.host,
       }));
-      const merged = mergeSubscriptionPayloads([...filtered, optimizedYaml]);
-      return new Response(merged, { headers: yamlHeaders });
+      const merged = mergeSubscriptionPayloads([etText, ykText, optimizedYaml]);
+      const cleaned = stripFakeCountryNodes(merged);
+      return new Response(cleaned, { headers: yamlHeaders });
     }
 
     return new Response('Not Found', { status: 404 });
@@ -83,7 +84,9 @@ export function stripFakeCountryNodes(yamlText: string): string {
       }
     }
   }
-  // 简单 YAML 逐行扫描：遇到 `- name: "<dropName>"` 时跳过该 proxy 块（缩进直到底层 0 缩进）
+  // 逐行扫描：
+  //   1) proxies 段：`- name: <dropName>` → 跳过整个 proxy 块（直到下一个 `- name:`）
+  //   2) proxy-groups 段：`- <dropName>` 引用行 → 删除该行
   let skipping = false;
   for (const line of lines) {
     if (skipping) {
@@ -100,6 +103,9 @@ export function stripFakeCountryNodes(yamlText: string): string {
         continue;
       }
     }
+    // proxy-groups 里的引用行：`      - 节点名`（无 `name:` 键）
+    const ref = line.match(/^\s+-\s+("?)(.+?)\1\s*$/);
+    if (ref && dropNames.has(ref[2]!)) continue;
     out.push(line);
   }
   return out.join('\n');
