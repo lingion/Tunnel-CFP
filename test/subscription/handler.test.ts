@@ -137,3 +137,70 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
     expect(seenPaths[0]).toBe('/b88ab8fa-392c-44b3-9343-612c11814708/cl');
   });
 });
+
+// 回归：vendor 把 request.cf.country 写在节点名上当"国家"(CF移动优选-CN-XXXXX)，
+// 但 CF edge IP 是 anycast 无国家级归属 → 误导。现 /sub/all 改为：
+//   1. vendor 输出过滤掉带假国家标签的"CF移动优选/联通/电信/官方优选-CN-..."节点
+//   2. 注入自研 64 个 CF-{REGION}-{N} 优选节点（区域按 CF PoP 数量加权）
+describe('/sub/all geo-honest nodes (fake-CN filtering + region-bucketed optimized nodes)', () => {
+  const FAKE_CN_YAML = `
+proxies:
+  - name: "CF移动优选-CN-1325251"
+    server: 104.19.151.76
+    port: 2083
+    type: vless
+  - name: "CF移动优选-CN-1325251·Trojan"
+    server: 104.19.151.76
+    port: 2083
+    type: trojan
+  - name: "CF_V1_www.visa.com_80"
+    server: www.visa.com
+    port: 80
+    type: vless
+  - name: "CF_V8_usa.visa.com_443"
+    server: usa.visa.com
+    port: 443
+    type: vless
+`;
+
+  const setupVendors = () => {
+    vi.resetModules();
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response(FAKE_CN_YAML, { status: 200 })) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
+    }));
+  };
+
+  it('filters fake-CN nodes and injects region-bucketed optimized nodes', async () => {
+    setupVendors();
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx2);
+    const text = await res.text();
+    const parsed: any = (await import('js-yaml')).load(text);
+
+    // 假国家节点全部消失
+    const names = parsed.proxies.map((p: any) => p.name);
+    expect(names.some((n: string) => /CF(移动|联通|电信|官方)优选/.test(n))).toBe(false);
+
+    // 自研 region 节点出现
+    const regionNodes = names.filter((n: string) => /^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/.test(n));
+    expect(regionNodes.length).toBeGreaterThan(0);
+  });
+
+  it('keeps domain-SNI nodes (visa series) intact', async () => {
+    setupVendors();
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx2);
+    const text = await res.text();
+    const parsed: any = (await import('js-yaml')).load(text);
+    const names = parsed.proxies.map((p: any) => p.name);
+    const cfv = names.filter((n: string) => n.startsWith('CF_V'));
+    expect(cfv.length).toBe(2);
+  });
+});

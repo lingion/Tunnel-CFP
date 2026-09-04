@@ -1,10 +1,12 @@
 // src/subscription/handler.ts — 实装
 // 路由：
-//   /sub/edgetunnel → vendor edgetunnel YAML
+//   /sub/edgetunnel → vendor edgetunnel YAML（保留所有 vendor 输出，含假 CN 段）
 //   /sub/yonggekkk  → vendor yonggekkk YAML（通用格式）
-//   /sub/all        → 两者合并
+//   /sub/all        → vendor 输出过滤掉"假国家"段（CF移动优选-CN-… 等）+ 注入自研 CF-{REGION}-…
 import { mergeSubscriptionPayloads } from './merge';
+import { generateOptimizedNodes, type OptimizedNode } from './cidr';
 import { md5md5 } from './md5';
+import type { ProxyDef } from './types';
 
 export async function handleSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
@@ -39,7 +41,13 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
     if (path === '/sub/edgetunnel') return new Response(etText, { headers: yamlHeaders });
     if (path === '/sub/yonggekkk') return new Response(ykText, { headers: yamlHeaders });
     if (path === '/sub/all') {
-      const merged = mergeSubscriptionPayloads([etText, ykText]);
+      // /sub/all：过滤假国家段 + 注入自研 64 个 region 节点
+      const filtered = [stripFakeCountryNodes(etText), ykText];
+      const optimizedYaml = optimizedNodesToYaml(generateOptimizedNodes({
+        uuid: env.UUID,
+        sni: url.host,
+      }));
+      const merged = mergeSubscriptionPayloads([...filtered, optimizedYaml]);
       return new Response(merged, { headers: yamlHeaders });
     }
 
@@ -47,6 +55,74 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
   } catch (e: any) {
     return new Response(`Subscription error: ${e.message}`, { status: 500 });
   }
+}
+
+// 把 vendor 输出里的"假国家"段过滤掉：
+//   CF移动优选-CN-... · CF联通优选-CN-... · CF电信优选-CN-... · CF官方优选-CN-...
+// vendor 把 request.cf.country + ASN 请求者的属性写到节点名上当"国家归属"——CF edge IP 是 anycast，
+// 不存在国家级归属，是误导信息。同时去掉对应的 Trojan 孪生（同名 + ·Trojan）
+export const FAKE_COUNTRY_PREFIX_RE = /^CF(移动|联通|电信|官方)优选-/;
+const TROJAN_TWIN_SUFFIX = '·Trojan';
+
+export function stripFakeCountryNodes(yamlText: string): string {
+  const lines = yamlText.split('\n');
+  const out: string[] = [];
+  // 先扫一遍，拿到要剔除的 name（vless + 孪生 trojan）
+  const dropNames = new Set<string>();
+  for (const l of lines) {
+    const m = l.match(/^\s*-\s*name:\s*"?([^"#]+?)"?\s*(?:#.*)?$/);
+    if (!m) continue;
+    const rawName = m[1]!;
+    if (FAKE_COUNTRY_PREFIX_RE.test(rawName)) {
+      dropNames.add(rawName);
+      // 孪生节点名是 `<原名>·Trojan`
+      if (rawName.endsWith(TROJAN_TWIN_SUFFIX)) {
+        dropNames.add(rawName.slice(0, -TROJAN_TWIN_SUFFIX.length));
+      } else {
+        dropNames.add(`${rawName}${TROJAN_TWIN_SUFFIX}`);
+      }
+    }
+  }
+  // 简单 YAML 逐行扫描：遇到 `- name: "<dropName>"` 时跳过该 proxy 块（缩进直到底层 0 缩进）
+  let skipping = false;
+  for (const line of lines) {
+    if (skipping) {
+      // 顶层（即新 proxy 起头的 `- name:`）则结束跳过
+      const isTopLevelProxyStart = /^\s*-\s+name:\s*/.test(line);
+      if (isTopLevelProxyStart) skipping = false;
+      else continue;
+    }
+    const m = line.match(/^\s*-\s*name:\s*"?([^"]+?)"?\s*(?:#.*)?$/);
+    if (m) {
+      const name = m[1]!;
+      if (dropNames.has(name)) {
+        skipping = true;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+// 自研 CF-{REGION}-{N} 节点 → 形如 vendor /sub mixed 输出的 vless:// 行（便于走 mergeSubscriptionPayloads）
+function optimizedNodesToYaml(nodes: OptimizedNode[]): string {
+  const lines: string[] = [];
+  for (const n of nodes) {
+    const pathEnc = encodeURIComponent(n['ws-opts'].path);
+    const params = [
+      `security=tls`,
+      `type=${n.network}`,
+      `host=${encodeURIComponent(n['ws-opts'].headers.Host)}`,
+      `fp=${n['client-fingerprint']}`,
+      `sni=${encodeURIComponent(n.sni)}`,
+      `path=${pathEnc}`,
+      `encryption=none`,
+    ].join('&');
+    const link = `vless://${n.uuid}@${n.server}:${n.port}?${params}#${encodeURIComponent(n.name)}`;
+    lines.push(link);
+  }
+  return lines.join('\n');
 }
 
 async function fetchVendorYaml(
