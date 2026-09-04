@@ -6,7 +6,7 @@
 // （节点 IP 天天变 → 客户端测速缓存作废 → 体验差）。
 import type { OptimizedNode } from './cidr';
 
-const POOL_CACHE_KEY = 'sub:pool:v2'; // v2=colo 命名时代(旧 v1 池含 APAC 旧名,不兼容)
+const POOL_CACHE_KEY = 'sub:pool:v3'; // v3=大区-机房 命名(v2 无大区字段,旧池不兼容)
 const POOL_TTL = 6 * 3600; // 6h
 
 export type GeoNamedNode = OptimizedNode;

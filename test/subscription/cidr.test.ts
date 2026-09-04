@@ -1,7 +1,7 @@
 // test/subscription/cidr.test.ts
 // /sub/all 优选节点命名误导修复：vendor 旧行为把 request.cf.country 当作 IP 国家标在节点名上
 // （CF edge IP 本就是 anycast，无真实国家级归属），现改成"按 CF PoP 区域分桶 + 已知大区命名"。
-// 命名格式：CF-{region}-{idx}；region 取自 cidr 内置的 bucket 映射，不发外网请求。
+// 命名格式：{大区}-{colo}-{idx}（如 APAC-HKG-01）；桶映射来自家宽实测，不发外网请求。
 import { describe, it, expect } from 'vitest';
 import {
   parseCidrText,
@@ -57,17 +57,17 @@ describe('generateOptimizedNodes colo bucketing', () => {
   //   SEA = 188.164.248 + 104.26/20 + 172.67.64/20
   //   废段(对自用 host 报 1034,不可用)已剔除:162.159.32/20 · 162.159.38/23 ·
   //   108.162.198/24 · 198.41.208/23
-  const COLO_RE = /^(HKG|LAX|SEA)$/;
+  const COLO_RE = /^(APAC|NA)$/; // 大区字段
 
   it('produces 64 nodes by default', () => {
     const nodes = generateOptimizedNodes({});
     expect(nodes.length).toBe(64);
   });
 
-  it('every node name starts with CF-{COLO}-', () => {
+  it('every node name = {region}-{colo}-{idx}', () => {
     const nodes = generateOptimizedNodes({});
     for (const n of nodes) {
-      expect(n.name).toMatch(/^CF-(HKG|LAX|SEA)-\d+$/);
+      expect(n.name).toMatch(/^(APAC-HKG|NA-LAX|NA-SEA)-\d+$/);
     }
   });
 
@@ -89,17 +89,27 @@ describe('generateOptimizedNodes colo bucketing', () => {
     }
   });
 
-  it('colo distribution matches measured landing (HKG 40 / LAX 12 / SEA 12)', () => {
+  it('name = {region}-{colo}-{idx} with no CF prefix', () => {
     const nodes = generateOptimizedNodes({});
-    const counts: Record<string, number> = { HKG: 0, LAX: 0, SEA: 0 };
     for (const n of nodes) {
-      const colo = n.name.split('-')[1]!;
-      expect(COLO_RE.test(colo)).toBe(true);
-      counts[colo] = (counts[colo] ?? 0) + 1;
+      const parts = n.name.split('-');
+      expect(parts.length).toBe(3);
+      expect(COLO_RE.test(parts[0]!)).toBe(true);
+      expect(/^(HKG|LAX|SEA)$/.test(parts[1]!)).toBe(true);
+      expect(/^\d{2}$/.test(parts[2]!)).toBe(true);
+      expect(n.name).not.toContain('CF');
     }
-    expect(counts.HKG).toBe(40);
-    expect(counts.LAX).toBe(12);
-    expect(counts.SEA).toBe(12);
+  });
+
+  it('colo distribution matches measured landing (APAC-HKG 40 / NA-LAX 12 / NA-SEA 12)', () => {
+    const nodes = generateOptimizedNodes({});
+    const counts: Record<string, number> = { 'APAC-HKG': 0, 'NA-LAX': 0, 'NA-SEA': 0 };
+    for (const n of nodes) {
+      counts[n.name.replace(/-\d+$/, '')] = (counts[n.name.replace(/-\d+$/, '')] ?? 0) + 1;
+    }
+    expect(counts['APAC-HKG']).toBe(40);
+    expect(counts['NA-LAX']).toBe(12);
+    expect(counts['NA-SEA']).toBe(12);
   });
 
   it('dead CIDRs (error 1034 for our host) are excluded from the pool', () => {

@@ -31,7 +31,7 @@ describe('getGeoNamedNodes (pool stabilization)', () => {
     const first = await getGeoNamedNodes(env, ctx, 'x.test');
     await Promise.all(waits);
     expect(first.length).toBe(64);
-    expect(first.every((n) => /^CF-(HKG|LAX|SEA)-\d{2}$/.test(n.name))).toBe(true);
+    expect(first.every((n) => /^(APAC-HKG|NA-LAX|NA-SEA)-\d{2}$/.test(n.name))).toBe(true);
     expect(kv.puts.length).toBe(1);
 
     const second = await getGeoNamedNodes(env, ctx, 'x.test');
@@ -43,7 +43,7 @@ describe('getGeoNamedNodes (pool stabilization)', () => {
     const { ctx } = ctxWithWaits();
     const nodes = await getGeoNamedNodes(env, ctx, 'x.test');
     expect(nodes.length).toBe(64);
-    expect(nodes.every((n) => /^CF-(HKG|LAX|SEA)-\d{2}$/.test(n.name))).toBe(true);
+    expect(nodes.every((n) => /^(APAC-HKG|NA-LAX|NA-SEA)-\d{2}$/.test(n.name))).toBe(true);
   });
 
   it('restores cached pool even if uuid differs (stable naming across requests)', async () => {

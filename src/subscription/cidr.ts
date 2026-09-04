@@ -5,14 +5,17 @@
 // Region 定义参考 cloudflarestatus.com/api/v2/components.json 351 PoP 分布（截止 2026-09）：
 //   2026-09-04 改为家宽实测落地 colo:HKG(104.x 大段+172.66) / LAX(8.35/8.39/91.193) / SEA(188.164/104.26/172.67)
 // 不做实时探测/外网请求——确定性、可缓存、可测试。
-export type Region = 'HKG' | 'LAX' | 'SEA';
+// 命名 = {大区}-{落地机房}-{序号},如 APAC-HKG-01 / NA-LAX-46
+export type Region = 'APAC' | 'NA';
+export type Colo = 'HKG' | 'LAX' | 'SEA';
+export type Bucket = 'APAC-HKG' | 'NA-LAX' | 'NA-SEA';
 
 export interface CidrEntry {
   cidr: string;
 }
 
 export interface OptimizedNode {
-  name: string;       // CF-{COLO}-{idx}
+  name: string;       // {大区}-{COLO}-{idx},如 APAC-HKG-01
   server: string;     // IPv4
   port: number;
   uuid: string;
@@ -58,9 +61,9 @@ const DEFAULT_CF_CIDR = `8.35.211.0/24
 104.26.0.0/20
 172.67.64.0/20`;
 
-// colo 权重(实测落地占比:HKG 段总空间最大,占大头;LAX 3 段;SEA 3 段)= 64 节点
-const DEFAULT_WEIGHTS: Record<Region, number> = {
-  HKG: 40, LAX: 12, SEA: 12,
+// 桶权重(实测落地占比:HKG 段总空间最大占大头;LAX 3 段;SEA 3 段)= 64 节点
+const DEFAULT_WEIGHTS: Record<Bucket, number> = {
+  'APAC-HKG': 40, 'NA-LAX': 12, 'NA-SEA': 12,
 };
 
 // CF 公开端口池（vendor 一致：[443, 2053, 2083, 2087, 2096, 8443]）
@@ -70,32 +73,32 @@ const CF_PORTS = [443, 2053, 2083, 2087, 2096, 8443] as const;
 // 但通过手工划分（参照 CF PoP 实际所在 + 公开 IP 段公开归属文档），足够"不骗人"。
 // 没匹配到的段归 HKG（104.x 主力段所在）。
 // 废段(对自用 host 报 1034)不入池:162.159.32/20 · 162.159.38/23 · 108.162.198/24 · 198.41.208/23
-const CIDR_BUCKETS: Record<string, Region> = {
+const CIDR_BUCKETS: Record<string, Bucket> = {
   // 2026-09-04 家宽(111.43.134.102, China Mobile)实测落地 colo,curl --resolve + /cdn-cgi/trace
-  // HKG:104.x 大段 + 172.66/22 全部落香港
-  '104.16.144.0/20': 'HKG',
-  '104.16.240.0/20': 'HKG',
-  '104.17.16.0/20': 'HKG',
-  '104.17.48.0/20': 'HKG',
-  '104.17.96.0/20': 'HKG',
-  '104.17.112.0/20': 'HKG',
-  '104.17.144.0/20': 'HKG',
-  '104.17.160.0/20': 'HKG',
-  '104.17.176.0/20': 'HKG',
-  '104.17.208.0/20': 'HKG',
-  '104.18.33.0/24': 'HKG',
-  '104.19.32.0/22': 'HKG',
-  '104.19.48.0/21': 'HKG',
-  '104.19.144.0/21': 'HKG',
-  '172.66.0.0/22': 'HKG',
-  // LAX:这三个段落洛杉矶
-  '8.35.211.0/24': 'LAX',
-  '8.39.125.0/24': 'LAX',
-  '91.193.58.0/23': 'LAX',
-  // SEA:这三个段落西雅图
-  '188.164.248.0/24': 'SEA',
-  '104.26.0.0/20': 'SEA',
-  '172.67.64.0/20': 'SEA',
+  // APAC-HKG:104.x 大段 + 172.66/22 全部落香港
+  '104.16.144.0/20': 'APAC-HKG',
+  '104.16.240.0/20': 'APAC-HKG',
+  '104.17.16.0/20': 'APAC-HKG',
+  '104.17.48.0/20': 'APAC-HKG',
+  '104.17.96.0/20': 'APAC-HKG',
+  '104.17.112.0/20': 'APAC-HKG',
+  '104.17.144.0/20': 'APAC-HKG',
+  '104.17.160.0/20': 'APAC-HKG',
+  '104.17.176.0/20': 'APAC-HKG',
+  '104.17.208.0/20': 'APAC-HKG',
+  '104.18.33.0/24': 'APAC-HKG',
+  '104.19.32.0/22': 'APAC-HKG',
+  '104.19.48.0/21': 'APAC-HKG',
+  '104.19.144.0/21': 'APAC-HKG',
+  '172.66.0.0/22': 'APAC-HKG',
+  // NA-LAX:这三个段落洛杉矶
+  '8.35.211.0/24': 'NA-LAX',
+  '8.39.125.0/24': 'NA-LAX',
+  '91.193.58.0/23': 'NA-LAX',
+  // NA-SEA:这三个段落西雅图
+  '188.164.248.0/24': 'NA-SEA',
+  '104.26.0.0/20': 'NA-SEA',
+  '172.67.64.0/20': 'NA-SEA',
 };
 
 // 解析 CIDR 文本为 CidrEntry[]
@@ -181,15 +184,15 @@ export function generateOptimizedNodes(opts: OptimizeOpts = {}): OptimizedNode[]
   if (all.length === 0) return [];
 
   // 按 region 桶分组
-  const byRegion: Record<Region, string[]> = {
-    HKG: [], LAX: [], SEA: [],
+  const byRegion: Record<Bucket, string[]> = {
+    'APAC-HKG': [], 'NA-LAX': [], 'NA-SEA': [],
   };
   for (const e of all) {
-    const region = CIDR_BUCKETS[e.cidr] ?? 'HKG';
-    byRegion[region].push(e.cidr);
+    const bucket = CIDR_BUCKETS[e.cidr] ?? 'APAC-HKG';
+    byRegion[bucket].push(e.cidr);
   }
 
-  const regions: Region[] = ['HKG', 'LAX', 'SEA'];
+  const regions: Bucket[] = ['APAC-HKG', 'NA-LAX', 'NA-SEA'];
   // 总权重
   const totalWeight = regions.reduce((s, r) => s + DEFAULT_WEIGHTS[r], 0);
 
@@ -219,7 +222,7 @@ export function generateOptimizedNodes(opts: OptimizeOpts = {}): OptimizedNode[]
         if (tries === 19) seen.add(key);
       }
       nodes.push({
-        name: `CF-${region}-${(idx + 1).toString().padStart(2, '0')}`,
+        name: `${region}-${(idx + 1).toString().padStart(2, '0')}`,
         server: key.split(':')[0]!,
         port,
         uuid,
