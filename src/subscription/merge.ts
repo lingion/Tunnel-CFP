@@ -4,6 +4,8 @@
 // proxy-groups 同名时合并 proxies 列表去重
 import * as yaml from 'js-yaml';
 import type { ClashConfig, ProxyDef, ProxyGroup } from './types';
+import { sha224Hex } from './sha224';
+export { sha224Hex };
 
 export function mergeYaml(yamls: string[]): string {
   const merged: ClashConfig = {
@@ -87,8 +89,19 @@ function normalizePayload(payload: string): string {
 }
 
 // share-link 行 → 最小 Clash config YAML（proxies + selector group + 基础规则）
+// vless 节点自动生成 Trojan 孪生节点（密码 sha224(该节点 uuid)）：vendor WS 入站按首包嗅探，
+// 同一条 WS 路径 vless/trojan 双协议并存，实测 e2e 通；被封一个切另一个
 function shareLinksToClashYaml(links: string[]): string {
-  const proxies = links.map(parseShareLink).filter((p): p is ProxyDef => p !== null);
+  const proxies: ProxyDef[] = [];
+  for (const link of links) {
+    const p = parseShareLink(link);
+    if (!p) continue;
+    proxies.push(p);
+    if (p.type === 'vless' && typeof p.uuid === 'string') {
+      const twin = buildTrojanTwin(p);
+      if (twin) proxies.push(twin);
+    }
+  }
   const config: ClashConfig = {
     proxies,
     'proxy-groups': [
@@ -103,16 +116,39 @@ function shareLinksToClashYaml(links: string[]): string {
   return yaml.dump(config, { lineWidth: -1, noRefs: true });
 }
 
-// vless://uuid@host:port?params#name → Clash ProxyDef（vless over ws/tls 覆盖本项目全部现网节点）
+// vless Clash 节点 → trojan 孪生（同 server/port/ws/tls，password=sha224(uuid)）
+function buildTrojanTwin(v: ProxyDef): ProxyDef | null {
+  const uuid = v.uuid;
+  if (typeof uuid !== 'string' || !uuid) return null;
+  const twin: ProxyDef = {
+    name: `${v.name}·Trojan`,
+    type: 'trojan',
+    server: v.server,
+    port: v.port,
+    password: sha224Hex(uuid),
+    udp: v.udp === true,
+    tls: true, // trojan 语义上强制 TLS；无 TLS 的明文节点不出孪生
+    network: v.network || 'tcp',
+  };
+  if (v.network === 'ws' && v['ws-opts'] && typeof v['ws-opts'] === 'object') {
+    twin['ws-opts'] = JSON.parse(JSON.stringify(v['ws-opts']));
+  }
+  if (typeof v.sni === 'string' && v.sni) twin.sni = v.sni;
+  else if (typeof v['server-name'] === 'string' && v['server-name']) twin.sni = v['server-name'];
+  if (v['skip-cert-verify'] === true) twin['skip-cert-verify'] = true;
+  return twin;
+}
+
+// vless://uuid@host:port?params#name / trojan://password@host:port?params#name → Clash ProxyDef
 export function parseShareLink(link: string): ProxyDef | null {
   const m = link.match(/^(vless|vmess|trojan|ss|hysteria2?):\/\//);
   if (!m) return null;
   const scheme = m[1];
-  if (scheme !== 'vless') return null; // 其余协议按需扩展，当前两家 vendor 都是 vless
+  if (scheme !== 'vless' && scheme !== 'trojan') return null; // vmess(base64主体)/ss/hy2 按需扩展
   try {
     const hashIdx = link.indexOf('#');
     const name = hashIdx >= 0 ? decodeURIComponent(link.slice(hashIdx + 1)) : `node-${Math.abs(hash(link)) % 10000}`;
-    const body = (hashIdx >= 0 ? link.slice(0, hashIdx) : link).slice('vless://'.length);
+    const body = (hashIdx >= 0 ? link.slice(0, hashIdx) : link).slice(`${scheme}://`.length);
     const qIdx = body.indexOf('?');
     const userInfo = qIdx >= 0 ? body.slice(0, qIdx) : body;
     const query = new URLSearchParams(qIdx >= 0 ? body.slice(qIdx + 1) : '');
@@ -130,14 +166,18 @@ export function parseShareLink(link: string): ProxyDef | null {
     const security = (query.get('security') || '').toLowerCase();
     const def: ProxyDef = {
       name,
-      type: 'vless',
+      type: scheme,
       server,
       port,
-      uuid,
       udp: query.get('udp') === 'true',
-      tls: security === 'tls' || security === 'reality',
+      tls: scheme === 'trojan' || security === 'tls' || security === 'reality',
       network,
     };
+    if (scheme === 'vless') {
+      def.uuid = uuid;
+    } else {
+      def.password = query.get('password') ?? uuid; // trojan 密码在 userinfo 位
+    }
     if (security === 'reality') {
       def['reality-opts'] = {
         'public-key': query.get('pbk') || '',

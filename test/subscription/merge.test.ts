@@ -109,7 +109,8 @@ describe('subscription normalization (vless URI list -> Clash config)', () => {
     const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
     const out = mergeSubscriptionPayloads([b64(vlessList), '']);
     const parsed: any = (await import('js-yaml')).load(out);
-    expect(parsed.proxies.length).toBe(2);
+    // vless 2 + trojan 孪生 2（密码 sha224(uuid)，见 trojan.test.ts 细节断言）
+    expect(parsed.proxies.length).toBe(4);
     const p1 = parsed.proxies[0];
     expect(p1.name).toBe('CF节点A');
     expect(p1.type).toBe('vless');
@@ -119,8 +120,7 @@ describe('subscription normalization (vless URI list -> Clash config)', () => {
     expect(p1.tls).toBe(true);
     expect(p1.network).toBe('ws');
     expect(p1['ws-opts'].headers.Host).toBe('cfp.example.test');
-    const p2 = parsed.proxies[1];
-    expect(p2.name).toBe('CF节点B');
+    const p2 = parsed.proxies.find((p: any) => p.name === 'CF节点B');
     expect(p2.tls).toBe(false);
     expect(p2.port).toBe(80);
     expect(p2['ws-opts'].path).toBe('/?ed=2560');
@@ -151,7 +151,7 @@ describe('subscription normalization (vless URI list -> Clash config)', () => {
     const parsed: any = (await import('js-yaml')).load(out);
     expect(parsed['proxy-groups'].length).toBeGreaterThan(0);
     const selector = parsed['proxy-groups'].find((g: any) => g.type === 'select');
-    expect(selector.proxies.length).toBe(2);
+    expect(selector.proxies.length).toBe(4);
     expect(parsed.rules.length).toBeGreaterThan(0);
   });
 });
