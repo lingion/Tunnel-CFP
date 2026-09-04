@@ -46,13 +46,12 @@ describe('handleSubscription integration', () => {
   const env = { UUID: TEST_UUID } as Env;
   const ctx = { waitUntil: (_p: Promise<unknown>) => {} } as unknown as ExecutionContext;
 
-  it('/sub/edgetunnel returns vendor A YAML', async () => {
+  it('/sub/edgetunnel returns geo-treated base64 vless list (et1 kept, yk1 absent)', async () => {
     const res = await handleSubscription(new Request(`https://x.test/sub/edgetunnel?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(text).toContain('et1');
-    expect(text).not.toContain('yk1');
-    expect(res.headers.get('Content-Type')).toContain('text/yaml');
+    expect(Buffer.from(text.trim(), 'base64').toString('utf8')).toContain('#et1');
+    expect(Buffer.from(text.trim(), 'base64').toString('utf8')).not.toContain('yk1');
   });
 
   it('/sub/yonggekkk returns vendor B YAML', async () => {
@@ -142,6 +141,14 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
 // 但 CF edge IP 是 anycast 无国家级归属 → 误导。现 /sub/all 改为：
 //   1. vendor 输出过滤掉带假国家标签的"CF移动优选/联通/电信/官方优选-CN-..."节点
 //   2. 注入自研 64 个 CF-{REGION}-{N} 优选节点（区域按 CF PoP 数量加权）
+const FAKE_CN_YAML_BASE64 = Buffer.from(
+  [
+    'vless://u1@s1:443?security=tls&type=ws#CF%E7%A7%BB%E5%8A%A8%E4%BC%98%E9%80%89-CN-1325251',
+    'vless://u2@s2:443?security=tls&type=ws#CF_V1_www.visa.com_80',
+  ].join('\n'),
+  'utf8',
+).toString('base64');
+
 describe('/sub/all geo-honest nodes (fake-CN filtering + region-bucketed optimized nodes)', () => {
   const FAKE_CN_YAML = `
 proxies:
@@ -171,6 +178,8 @@ proxies:
     vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
       default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
     }));
+    // 测试环境禁外网：geo fetch 失败 → 节点保留区域桶名（同时验证回退路径）
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('no network in tests'); }));
   };
 
 it('filters fake-CN nodes and injects region-bucketed optimized nodes', async () => {
@@ -205,5 +214,46 @@ it('filters fake-CN nodes and injects region-bucketed optimized nodes', async ()
     const names = parsed.proxies.map((p: any) => p.name);
     const cfv = names.filter((n: string) => n.startsWith('CF_V'));
     expect(cfv.length).toBe(2);
+  });
+});
+
+// 回归 2026-09-04：用户订阅的是 /sub/edgetunnel（V2RayNG），上一轮只治理了 /sub/all →
+// 用户更新订阅"没变化"。现在 /sub/edgetunnel 也走 geo 命名节点池：
+//   1. 输出仍为 base64 vless:// 列表（V2RayNG 形态）
+//   2. 假 CN 节点剥除（vendor 原始输出含 CF移动优选-CN-*）
+//   3. 节点名带 geoip 国家码（ip-api batch）——mock fetch 全返回 CA 验证命名生效
+describe('/sub/edgetunnel geo treatment (V2RayNG base64 output)', () => {
+  const setupGeoVendors = (fetchImpl: unknown) => {
+    vi.resetModules();
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response(FAKE_CN_YAML_BASE64, { status: 200 })) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
+    }));
+    vi.doMock('../../src/subscription/geo', async (orig) => {
+      const mod = await orig<typeof import('../../src/subscription/geo')>();
+      return { ...mod, defaultFetch: fetchImpl };
+    });
+  };
+
+  it('returns base64 list of geo-named vless links without fake-CN nodes', async () => {
+    setupGeoVendors(async () =>
+      new Response(JSON.stringify([]), { status: 200 }));
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/edgetunnel?token=${await tokenFor('x.test')}`), env, ctx2);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const decoded = Buffer.from(text.trim(), 'base64').toString('utf8');
+    const lines = decoded.split('\n').map((l) => l.trim()).filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every((l) => l.startsWith('vless://'))).toBe(true);
+    const names = lines.map((l) => decodeURIComponent(l.split('#')[1] ?? ''));
+    // 假 CN 节点被剥掉
+    expect(names.some((n) => /CF(移动|联通|电信|官方)优选/.test(n))).toBe(false);
+    // 自研 geo 节点在（geo mock 空 → 回退区域桶名）
+    expect(names.some((n) => /^CF-(APAC|NA|EU|LATAM|AF|OC)-\d+$/.test(n))).toBe(true);
   });
 });

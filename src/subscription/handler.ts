@@ -1,10 +1,12 @@
 // src/subscription/handler.ts — 实装
 // 路由：
-//   /sub/edgetunnel → vendor edgetunnel YAML（保留所有 vendor 输出，含假 CN 段）
-//   /sub/yonggekkk  → vendor yonggekkk YAML（通用格式）
-//   /sub/all        → vendor 输出过滤掉"假国家"段（CF移动优选-CN-… 等）+ 注入自研 CF-{REGION}-…
+//   /sub/edgetunnel → 治理后的 base64 vless 列表（V2RayNG 形态）：剥假 CN + 注入 geoip 命名自研节点
+//   /sub/yonggekkk  → vendor yonggekkk YAML（通用格式，原样）
+//   /sub/all        → 治理后的 Clash YAML：剥假 CN + 注入 geoip 命名自研节点
+import * as yaml from 'js-yaml';
 import { mergeSubscriptionPayloads } from './merge';
-import { generateOptimizedNodes, type OptimizedNode } from './cidr';
+import { getGeoNamedNodes, resolveGeoCountries } from './geo';
+import { type OptimizedNode } from './cidr';
 import { md5md5 } from './md5';
 import type { ProxyDef } from './types';
 
@@ -38,15 +40,21 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
 
     const yamlHeaders = { 'Content-Type': 'text/yaml; charset=utf-8' };
 
-    if (path === '/sub/edgetunnel') return new Response(etText, { headers: yamlHeaders });
+    if (path === '/sub/edgetunnel') {
+      // V2RayNG 链接：vendor base64 列表先走同一套治理（merge 规范化 → 剥假 CN），
+      // 再反向导出 base64 vless 列表（保持客户端形态），追加 geoip 命名自研节点
+      const geoNodes = await getGeoNamedNodes(env, ctx, url.host);
+      const merged = mergeSubscriptionPayloads([etText, optimizedNodesToYaml(geoNodes)]);
+      const cleaned = stripFakeCountryNodes(merged);
+      const links = clashToVlessLinks(cleaned);
+      return new Response(btoa(links), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    }
     if (path === '/sub/yonggekkk') return new Response(ykText, { headers: yamlHeaders });
     if (path === '/sub/all') {
       // /sub/all：先合并，再对最终 YAML 过滤假国家段（vendor 输出可能是 base64 vless 列表，
       // 必须等 mergeSubscriptionPayloads 规范化成 Clash YAML 后才能按 name 过滤）
-      const optimizedYaml = optimizedNodesToYaml(generateOptimizedNodes({
-        uuid: env.UUID,
-        sni: url.host,
-      }));
+      const geoNodes = await getGeoNamedNodes(env, ctx, url.host);
+      const optimizedYaml = optimizedNodesToYaml(geoNodes);
       const merged = mergeSubscriptionPayloads([etText, ykText, optimizedYaml]);
       const cleaned = stripFakeCountryNodes(merged);
       return new Response(cleaned, { headers: yamlHeaders });
@@ -109,6 +117,40 @@ export function stripFakeCountryNodes(yamlText: string): string {
     out.push(line);
   }
   return out.join('\n');
+}
+
+// 治理后的 Clash YAML → base64 vless 列表（/sub/edgetunnel 形态，V2RayNG 订阅直接吃）
+// 只导出 vless 节点（Trojan 孪生是 Clash 侧冗余，vless 已含全部信息）
+function clashToVlessLinks(yamlText: string): string {
+  const parsed = (yaml.load(yamlText) as { proxies?: ProxyDef[] } | null) || {};
+  const links: string[] = [];
+  for (const p of parsed.proxies ?? []) {
+    if (p.type !== 'vless') continue;
+    const server = typeof p.server === 'string' ? p.server : '';
+    const port = typeof p.port === 'number' ? p.port : NaN;
+    if (!server || !Number.isFinite(port)) continue;
+    const uuid = typeof p.uuid === 'string' ? p.uuid : '';
+    const wsOpts = (p['ws-opts'] && typeof p['ws-opts'] === 'object' ? p['ws-opts'] : {}) as {
+      path?: unknown; headers?: { Host?: unknown };
+    };
+    const host: string = (typeof p.sni === 'string' && p.sni) ||
+      (typeof p['server-name'] === 'string' && p['server-name']) ||
+      (typeof wsOpts.headers?.Host === 'string' && wsOpts.headers.Host) || server;
+    const wsPath = typeof wsOpts.path === 'string' && wsOpts.path ? wsOpts.path : '/';
+    const fp = typeof p['client-fingerprint'] === 'string' && p['client-fingerprint']
+      ? p['client-fingerprint'] : 'chrome';
+    const params = new URLSearchParams({
+      security: 'tls',
+      type: 'ws',
+      host,
+      sni: host,
+      path: wsPath,
+      encryption: 'none',
+      fp,
+    });
+    links.push(`vless://${uuid}@${server}:${port}?${params.toString()}#${encodeURIComponent(p.name)}`);
+  }
+  return links.join('\n');
 }
 
 // 自研 CF-{REGION}-{N} 节点 → 形如 vendor /sub mixed 输出的 vless:// 行（便于走 mergeSubscriptionPayloads）
