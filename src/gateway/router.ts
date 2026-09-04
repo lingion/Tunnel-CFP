@@ -36,7 +36,9 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       if (e instanceof BadTargetError) return jsonError(400, "BAD_TARGET", e.message);
       throw e;
     }
-    return forward(request, target);
+    // 值级擦除: 防止用 X-API-Key 头鉴权时, 该头带着网关 key 原样转发给第三方
+    const rv = env.AGENT_KEY ? [env.AGENT_KEY] : [];
+    return forward(request, target, rv);
   }
 
   return jsonError(404, "NOT_FOUND", `unknown gateway endpoint: ${path}`);

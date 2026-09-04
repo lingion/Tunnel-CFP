@@ -6,13 +6,15 @@ export class BadTargetError extends Error {
   constructor(message: string) { super(message); this.name = "BadTargetError"; }
 }
 
-export function sanitizeRequestHeaders(h: Headers): Headers {
+/** 值级擦除: 值命中 redactValues（网关鉴权值）的头被剔除, 其余照传。 */
+export function sanitizeRequestHeaders(h: Headers, redactValues: string[] = []): Headers {
   const out = new Headers();
   for (const [k, v] of h.entries()) {
     const lower = k.toLowerCase();
     if (HOP_BY_HOP_STRIP.includes(lower)) continue;
     if (lower.startsWith("cf-")) continue;
     if (lower.startsWith("x-forwarded-")) continue;
+    if (v !== "" && redactValues.includes(v)) continue;
     out.set(k, v);
   }
   return out;
@@ -41,8 +43,8 @@ export function buildTargetUrl(pathAfterPrefix: string, incomingUrl: string): UR
   return target;
 }
 
-export async function forward(req: Request, target: URL): Promise<Response> {
-  const headers = sanitizeRequestHeaders(req.headers);
+export async function forward(req: Request, target: URL, redactValues: string[] = []): Promise<Response> {
+  const headers = sanitizeRequestHeaders(req.headers, redactValues);
   const hasBody = !["GET", "HEAD"].includes(req.method);
   const res = await fetch(target, {
     method: req.method,

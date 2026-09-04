@@ -50,7 +50,7 @@ curl -H "X-API-Key: $AGENT_KEY" https://proxy.qdp.qzz.io/api/v1/fetch/https://ex
 curl -N -H "X-API-Key: $AGENT_KEY" "https://proxy.qdp.qzz.io/api/v1/fetch/https://httpbin.org/drip?duration=3&numbytes=3"
 ```
 
-Claude Code 环境变量法（可工作的配置）。Claude Code 不发 `X-API-Key` 头，所以网关鉴权 key 走 `?key=` query 拼进 BASE_URL；`x-api-key`/`authorization` 等请求头原样透传给上游（Claude Code 发的鉴权头直接到达 Anthropic）：
+> 警示：用 `X-API-Key` 头方式调用时，网关会自动做**值级擦除**——转发前剔除所有值恰等于网关 key 的请求头，防止 key 泄给第三方目标站（其余头照传，上游 API 自己的凭据不受影响）。也可全程用 `?key=` 方式（推荐，URL 中该参数拼目标时会被剥离，天然不外泄）。
 
 ```bash
 source ~/.proxy-secrets.env

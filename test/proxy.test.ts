@@ -23,6 +23,36 @@ describe("sanitizeRequestHeaders", () => {
     expect(out.get("authorization")).toBe("Bearer tk");
     expect(out.get("content-type")).toBe("application/json");
   });
+
+  it("redacts headers whose value equals an entry in redactValues (gateway key leak guard)", () => {
+    const h = new Headers({
+      "X-Api-Key": "gwkey",
+      "Authorization": "Bearer up",
+    });
+    const out = sanitizeRequestHeaders(h, ["gwkey"]);
+    expect(out.get("x-api-key")).toBeNull(); // 网关鉴权值 → 值级擦除
+    expect(out.get("authorization")).toBe("Bearer up"); // 真正的上游凭据照传
+  });
+
+  it("ignores empty strings in redactValues (no accidental header drops)", () => {
+    const h = new Headers({
+      "X-Api-Key": "upstream-key",
+      "Authorization": "Bearer up",
+    });
+    const out = sanitizeRequestHeaders(h, [""]);
+    expect(out.get("x-api-key")).toBe("upstream-key");
+    expect(out.get("authorization")).toBe("Bearer up");
+  });
+
+  it("behaves as before when redactValues omitted (default = no redaction)", () => {
+    const h = new Headers({
+      "X-Api-Key": "secret",
+      "Authorization": "Bearer tk",
+    });
+    const out = sanitizeRequestHeaders(h);
+    expect(out.get("x-api-key")).toBe("secret");
+    expect(out.get("authorization")).toBe("Bearer tk");
+  });
 });
 
 describe("buildTargetUrl", () => {
