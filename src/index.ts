@@ -7,6 +7,7 @@ import { handleDoh } from "./doh/handler";
 import { handleWebProxy } from "./proxy-web/handler";
 import { handleWsBridge } from "./proxy-web/ws-bridge";
 import { checkProxyAuth } from "./proxy-web/auth";
+import { rescueNavigation } from "./proxy-web/rescue";
 import { handleSubscription } from "./subscription/handler";
 
 export default {
@@ -32,6 +33,10 @@ export default {
     if (url.pathname.startsWith("/sub/")) {
       return handleSubscription(request, env, ctx);
     }
+    // 兜底优先级:代理页 JS location 赋值导航救援 > edgetunnel(面板/VLESS)
+    // JS 里 location.href="/x" 会打到 cfp 域 /x;Referer 指向 /proxy/ 页时 302 救回
+    const rescued = rescueNavigation(request);
+    if (rescued) return rescued;
     return edgetunnel.fetch(request, env, ctx);
   },
 };

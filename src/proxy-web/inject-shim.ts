@@ -14,19 +14,20 @@ function shimSource(): string {
 (function() {
   if (window.__PROXY_SHIM__) return;
   window.__PROXY_SHIM__ = true;
-  var BASE = window.__PROXY_BASE__ || '';  // 目标站 origin,由服务端注入
+  // __proxy_last_host 由服务端 baseInject script 写入(彼时 __PROXY_BASE__ 已就绪)
+  function BASE() { return window.__PROXY_BASE__ || ''; }  // getter:服务端 baseInject 在本 shim 之后才执行,不能启动时捕获
   var SKIP_RE = /^(data:|blob:|javascript:|about:|mailto:|tel:|#)/i;
   function toProxy(url) {
     if (url == null) return url;
     try {
       if (typeof Request !== 'undefined' && url instanceof Request) {
-        var ru = new URL(url.url, BASE || location.href);
+        var ru = new URL(url.url, BASE() || location.href);
         return new Request('/proxy/' + ru.href, url);
       }
       var s = String(url);
       if (SKIP_RE.test(s)) return url;
       if (s.indexOf('/proxy/') === 0 || s.indexOf('/proxy-ws/') === 0) return url;
-      var abs = new URL(s, BASE || location.href);
+      var abs = new URL(s, BASE() || location.href);
       if (abs.href.indexOf(location.origin + '/proxy/') === 0) return url;
       return '/proxy/' + abs.href;
     } catch (e) { return url; }

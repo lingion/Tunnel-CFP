@@ -175,7 +175,8 @@ async function transformHtml(targetRes: Response, finalUrl: string): Promise<Res
   const baseInject = new HTMLRewriter().on('head', {
     element(el: any) {
       el.prepend(
-        `<script>window.__PROXY_BASE__ = ${JSON.stringify(ctx.currentOrigin + ctx.currentPath)};</script>`,
+        `<script>window.__PROXY_BASE__ = ${JSON.stringify(ctx.currentOrigin + ctx.currentPath)};` +
+        `try{document.cookie='__proxy_last_host='+new URL(window.__PROXY_BASE__).hostname+'; path=/; max-age=86400; SameSite=Lax'}catch(e){}</script>`,
         { html: true },
       );
     },

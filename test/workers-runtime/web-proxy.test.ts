@@ -1,6 +1,7 @@
 // 真 workers runtime 下测完整 handleWebProxy 管线(真 HTMLRewriter + 真 fetch stub)
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleWebProxy } from '../../src/proxy-web/handler';
+import { rescueNavigation } from '../../src/proxy-web/rescue';
 
 const SELF = 'https://cfp.lingion04.workers.dev';
 
@@ -426,5 +427,73 @@ describe('round4: no-transform on HTML', () => {
     const res = await handleWebProxy(proxyReq('https://target.com/'));
     const cc = res.headers.get('Cache-Control') ?? '';
     expect(cc).toContain('no-transform');
+  });
+});
+
+describe('round5: navigation rescue for JS location redirects', () => {
+  it('unproxied same-site path on cfp domain gets 302 to /proxy/ form', async () => {
+    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/articles/2', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/articles/1' },
+    }));
+    expect(res?.status).toBe(302);
+    expect(res?.headers.get('Location')).toBe('/proxy/https://target.com/articles/2');
+  });
+
+  it('unproxied absolute-path with query also rescued', async () => {
+    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/search?q=x', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/page' },
+    }));
+    expect(res?.headers.get('Location')).toBe('/proxy/https://target.com/search?q=x');
+  });
+
+  it('no Referer → null (rescue must not over-trigger)', () => {
+    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/some/path'))).toBeNull();
+  });
+
+  it('external Referer → null', () => {
+    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
+      headers: { Referer: 'https://evil.example/page' },
+    }))).toBeNull();
+  });
+
+  it('Referer without /proxy/ prefix on self domain → null', () => {
+    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/sub/all' },
+    }))).toBeNull();
+  });
+
+  it('rescue maps onto the REFERER target site', () => {
+    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/api/data', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://other.org/dashboard' },
+    }));
+    expect(res?.headers.get('Location')).toBe('/proxy/https://other.org/api/data');
+  });
+
+  it('self-recursion target rejected inside rescue', () => {
+    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/proxy/https://other.org/x', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/page' },
+    }));
+    // 救援目标本身又含 /proxy/ 前缀的路径,validateTargetUrl 会拦(对象是 cfp 域?)—
+    // 这里 path=/proxy/https://… 对 target.com 而言只是普通路径,应放行
+    expect(res?.status).toBe(302);
+  });
+});
+
+describe('round5b: origin-only Referer rescue via last-host cookie', () => {
+  it('origin-only Referer + __proxy_last_host cookie → rescued', () => {
+    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/wiki/Main_Page', {
+      headers: {
+        Referer: 'https://cfp.lingion04.workers.dev/',
+        Cookie: '__proxy_last_host=en.wikipedia.org',
+      },
+    }));
+    expect(res?.status).toBe(302);
+    expect(res?.headers.get('Location')).toBe('/proxy/https://en.wikipedia.org/wiki/Main_Page');
+  });
+
+  it('no cookie and origin-only Referer → null', () => {
+    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
+      headers: { Referer: 'https://cfp.lingion04.workers.dev/' },
+    }))).toBeNull();
   });
 });
