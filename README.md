@@ -257,4 +257,4 @@ PRs are accepted at <https://github.com/lingion/Tunnel-CFP>. By contributing, yo
 
 GNU General Public License v2.0. See [LICENSE](./LICENSE).
 
-This project cannot adopt GPLv3: the vendored edgetunnel engine is licensed GPL-2.0-only (no "or later" grant), so the combined work must stay under GPL-2.0. You may use, modify, and redistribute this work provided that derivative works are also licensed under GPL-2.0 and the copyright notice is preserved. No warranty is provided. Vendored components remain under their respective licenses as described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+You may use, modify, and redistribute this work provided that derivative works are also licensed under GPL-2.0 and the copyright notice is preserved. No warranty is provided. Vendored components remain under their respective licenses as described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

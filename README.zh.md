@@ -255,4 +255,4 @@ PR 接收地址 <https://github.com/lingion/Tunnel-CFP>。提交即表示同意�
 
 GNU General Public License v2.0,见 [LICENSE](./LICENSE)。
 
-本项目无法改用 GPLv3:vendored 的 edgetunnel 引擎是 GPL-2.0-only(无 "or later" 授权),组合作品必须保持 GPL-2.0。允许使用、修改、再分发,前提是衍生作品同样以 GPL-2.0 授权并保留版权声明。不提供任何担保。vendored 组件沿用各自许可证,见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+允许使用、修改、再分发,前提是衍生作品同样以 GPL-2.0 授权并保留版权声明。不提供任何担保。vendored 组件沿用各自许可证,见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
