@@ -253,8 +253,11 @@ async function pumpSocketToWs(
       // 服务端正常关流:完成与浏览器的 close 握手(compat date 2025-09-01 下
       // 不主动 close 的浏览器侧看到 1006;审计实锤)
       try { ws.close(1000, ''); } catch { /* closed */ }
-    } catch {
-      try { ws.close(1011, 'bridge read error'); } catch { /* closed */ }
+    } catch (e) {
+      // 异常消息进 close reason(≤120 字节):桥对源站故障的可观测通道,
+      // 免 wrangler tail 依赖(镜像网络下 tail 不可用)
+      const msg = e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 120) : 'bridge read error';
+      try { ws.close(1011, msg || 'bridge read error'); } catch { /* closed */ }
     }
   })();
 }
