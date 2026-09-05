@@ -95,7 +95,21 @@ function shimSource(): string {
       return _open2.call(window, toProxy(url), name, specs);
     };
   }
-  // 导航兜底:点击/表单之外的 JS 赋值 location.href(不能直接劫持赋值,退而求其次监听 beforeunload 前不做处理 — 留白)
+  // serviceWorker:目标站注册 SW 会把作用域挂到 cfp 域,劫持我们自己的页面 — noop 化
+  try {
+    if (navigator.serviceWorker) {
+      navigator.serviceWorker.register = function() {
+        return Promise.reject(new DOMException('serviceWorker disabled inside proxy', 'NotSupportedError'));
+      };
+    }
+  } catch (e) {}
+  // sendBeacon(分析/埋点请求)
+  var _beacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+  if (_beacon) {
+    navigator.sendBeacon = function(url, data) {
+      return _beacon(toProxy(url), data);
+    };
+  }
 })();
 `;
 }
