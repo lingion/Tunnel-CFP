@@ -35,9 +35,9 @@ describe('MD5 polyfill (RFC 1321 vectors)', () => {
 });
 
 describe('MD5MD5 token (md5(hex[7:27]))', () => {
-  it('matches live anchor: MD5MD5(cfp.qdp.qzz.io + UUID) used by /sub auth', async () => {
-    const token = await md5md5('cfp.qdp.qzz.io' + 'b88ab8fa-392c-44b3-9343-612c11814708');
-    // 该值由 Node crypto.createHash('md5') 独立算出并与线上 200 响应对齐
-    expect(token).toBe('dc61f1ed35da14f35fab8743f1e9088e');
+  it('matches live anchor: MD5MD5(worker.example.com + UUID) used by /sub auth', async () => {
+    const token = await md5md5('worker.example.com' + '12345678-1234-4123-8123-123456789abc');
+    // 该值由 Node crypto.createHash('md5') 独立算出
+    expect(token).toBe('dd7c9ec20084c6806391a4f0427d62db');
   });
 });

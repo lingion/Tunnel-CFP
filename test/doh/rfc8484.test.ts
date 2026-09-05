@@ -43,7 +43,7 @@ describe('DoH RFC 8484 handler', () => {
 
   it('accepts POST with application/dns-message and returns binary response', async () => {
     const query = makeQuery();
-    const req = new Request('https://cfp.lingion04.workers.dev/dns-query', {
+    const req = new Request('https://worker.your-subdomain.workers.dev/dns-query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/dns-message' },
       body: query,
@@ -56,7 +56,7 @@ describe('DoH RFC 8484 handler', () => {
   });
 
   it('rejects POST with wrong Content-Type (415)', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/dns-query', {
+    const req = new Request('https://worker.your-subdomain.workers.dev/dns-query', {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: 'hello',
@@ -70,7 +70,7 @@ describe('DoH RFC 8484 handler', () => {
     // base64url encode without padding
     let b64 = btoa(String.fromCharCode(...query));
     b64 = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const req = new Request(`https://cfp.lingion04.workers.dev/dns-query?dns=${b64}`, {
+    const req = new Request(`https://worker.your-subdomain.workers.dev/dns-query?dns=${b64}`, {
       method: 'GET',
     });
     const res = await handleRfc8484(req, fakeCtx);
@@ -78,20 +78,20 @@ describe('DoH RFC 8484 handler', () => {
   });
 
   it('rejects GET without dns param (400)', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/dns-query', { method: 'GET' });
+    const req = new Request('https://worker.your-subdomain.workers.dev/dns-query', { method: 'GET' });
     const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(400);
   });
 
   it('rejects other methods (405)', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/dns-query', { method: 'PUT' });
+    const req = new Request('https://worker.your-subdomain.workers.dev/dns-query', { method: 'PUT' });
     const res = await handleRfc8484(req, fakeCtx);
     expect(res.status).toBe(405);
   });
 
   it('rejects payload > 65535 bytes (413)', async () => {
     const tooBig = new Uint8Array(65536);
-    const req = new Request('https://cfp.lingion04.workers.dev/dns-query', {
+    const req = new Request('https://worker.your-subdomain.workers.dev/dns-query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/dns-message' },
       body: tooBig,
@@ -108,7 +108,7 @@ describe('DoH RFC 8484 cache integration', () => {
     b64 = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     const seen: Promise<unknown>[] = [];
     const realCtx = { waitUntil: (p: Promise<unknown>) => seen.push(p) } as unknown as ExecutionContext;
-    const req = new Request(`https://cfp.lingion04.workers.dev/dns-query?dns=${b64}`, { method: 'GET' });
+    const req = new Request(`https://worker.your-subdomain.workers.dev/dns-query?dns=${b64}`, { method: 'GET' });
     const res = await handleRfc8484(req, realCtx);
     expect(res.status).toBe(200);
   });

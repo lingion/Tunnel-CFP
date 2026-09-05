@@ -106,13 +106,13 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
       },
     }));
     const { handleSubscription } = await import('../../src/subscription/handler');
-    const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
+    const env = { UUID: '12345678-1234-4123-8123-123456789abc' } as unknown as Env;
     const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
     const res = await handleSubscription(new Request(`https://x.test/sub/yonggekkk?token=${await md5md5('x.test' + env.UUID)}`), env, ctx2);
     expect(res.status).toBe(200);
     expect(seenEnvs.length).toBe(1);
-    expect(seenEnvs[0].uuid).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
-    expect(seenEnvs[0].UUID).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
+    expect(seenEnvs[0].uuid).toBe('12345678-1234-4123-8123-123456789abc');
+    expect(seenEnvs[0].UUID).toBe('12345678-1234-4123-8123-123456789abc');
   });
 
   it('requests the vendor path with the real UUID (not vendor hardcoded)', async () => {
@@ -130,10 +130,10 @@ describe('vendor env casing (yonggekkk lowercase uuid)', () => {
       },
     }));
     const { handleSubscription } = await import('../../src/subscription/handler');
-    const env = { UUID: 'b88ab8fa-392c-44b3-9343-612c11814708' } as unknown as Env;
+    const env = { UUID: '12345678-1234-4123-8123-123456789abc' } as unknown as Env;
     const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
     await handleSubscription(new Request(`https://x.test/sub/yonggekkk?token=${await md5md5('x.test' + env.UUID)}`), env, ctx2);
-    expect(seenPaths[0]).toBe('/b88ab8fa-392c-44b3-9343-612c11814708/cl');
+    expect(seenPaths[0]).toBe('/12345678-1234-4123-8123-123456789abc/cl');
   });
 });
 

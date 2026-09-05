@@ -18,7 +18,7 @@ describe('DoH /resolve JSON API', () => {
   });
 
   it('returns JSON for A record query', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com&type=A');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com&type=A');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toContain('application/dns-json');
@@ -29,32 +29,32 @@ describe('DoH /resolve JSON API', () => {
   });
 
   it('defaults to A type if not specified', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(200);
   });
 
   it('rejects missing name param (400)', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(400);
   });
 
   it('rejects unsupported type (400)', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com&type=SOA');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com&type=SOA');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(400);
   });
 
   it('accepts AAAA query type', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com&type=AAAA');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com&type=AAAA');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(200);
   });
 
   it('returns 502 on upstream failure', async () => {
     globalThis.fetch = vi.fn(async () => new Response('boom', { status: 502 })) as any;
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com');
     const res = await handleJsonApi(req);
     expect(res.status).toBe(502);
   });
@@ -67,7 +67,7 @@ describe('DoH /resolve Google/Cloudflare-compatible contract', () => {
   });
 
   it('A query returns Status/Answer with numeric type', async () => {
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com&type=A');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com&type=A');
     const res = await handleJsonApi(req);
     const body: any = await res.json();
     expect(body.Status).toBe(0);
@@ -87,7 +87,7 @@ describe('DoH /resolve Google/Cloudflare-compatible contract', () => {
       questions: [{ type: 'A', name: 'no-such.example', class: 'IN' }],
     });
     globalThis.fetch = vi.fn(async () => new Response(nx, { status: 200 })) as any;
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=no-such.example&type=A');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=no-such.example&type=A');
     const res = await handleJsonApi(req);
     const body: any = await res.json();
     expect(body.Status).toBe(3);
@@ -103,7 +103,7 @@ describe('DoH /resolve Google/Cloudflare-compatible contract', () => {
       answers: [{ type: 'AAAA', name: 'example.com', class: 'IN', ttl: 120, data: '2606:2800:220:1:248:1893:25c8:1946' }],
     });
     globalThis.fetch = vi.fn(async () => new Response(aaaa, { status: 200 })) as any;
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=example.com&type=AAAA');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=example.com&type=AAAA');
     const res = await handleJsonApi(req);
     const body: any = await res.json();
     expect(body.Status).toBe(0);
@@ -122,7 +122,7 @@ describe('DoH /resolve Google/Cloudflare-compatible contract', () => {
       ],
     });
     globalThis.fetch = vi.fn(async () => new Response(cname, { status: 200 })) as any;
-    const req = new Request('https://cfp.lingion04.workers.dev/resolve?name=alias.example&type=A');
+    const req = new Request('https://worker.your-subdomain.workers.dev/resolve?name=alias.example&type=A');
     const res = await handleJsonApi(req);
     const body: any = await res.json();
     expect(body.Status).toBe(0);

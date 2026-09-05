@@ -4,12 +4,12 @@ import { validateTargetUrl, SecurityError } from '../../src/proxy-web/security';
 
 describe('validateTargetUrl', () => {
   it('rejects self-recursion (exact host)', () => {
-    expect(() => validateTargetUrl('https://cfp.lingion04.workers.dev/foo'))
+    expect(() => validateTargetUrl('https://your-worker.your-subdomain.workers.dev/foo'))
       .toThrow(SecurityError);
   });
 
   it('rejects self-recursion (subdomain)', () => {
-    expect(() => validateTargetUrl('https://evil.cfp.lingion04.workers.dev/foo'))
+    expect(() => validateTargetUrl('https://evil.your-worker.your-subdomain.workers.dev/foo'))
       .toThrow(/self/i);
   });
 
@@ -40,14 +40,14 @@ describe('validateTargetUrl', () => {
   });
 });
 describe('self recursion: production domain', () => {
-  it('blocks cfp.qdp.qzz.io targets', () => {
-    expect(() => validateTargetUrl('https://cfp.qdp.qzz.io/proxy/x')).toThrow(/Self recursion/);
+  it('blocks SELF_HOSTS targets', () => {
+    expect(() => validateTargetUrl('https://your-worker.your-subdomain.workers.dev/proxy/x')).toThrow(/Self recursion/);
   });
-  it('blocks subdomains of production domain', () => {
-    expect(() => validateTargetUrl('https://evil.cfp.qdp.qzz.io/')).toThrow(/Self recursion/);
+  it('blocks subdomains of SELF_HOSTS', () => {
+    expect(() => validateTargetUrl('https://evil.sub.your-worker.your-subdomain.workers.dev/')).toThrow(/Self recursion/);
   });
-  it('still allows unrelated qdp hosts', () => {
-    expect(() => validateTargetUrl('https://gh.qdp.qzz.io/foo')).not.toThrow();
+  it('still allows unrelated external hosts', () => {
+    expect(() => validateTargetUrl('https://gh.example.com/foo')).not.toThrow();
   });
 });
 

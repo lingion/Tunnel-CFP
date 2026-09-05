@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { mergeSubscriptionPayloads } from '../../src/subscription/merge';
 
 const b64 = (s: string) => Buffer.from(s).toString('base64');
-const UUID = 'b88ab8fa-392c-44b3-9343-612c11814708';
+const UUID = '12345678-1234-4123-8123-123456789abc';
 // sha224(UUID)（Node crypto 计算，作为期望值锚点）
 import { createHash } from 'node:crypto';
 const TROJAN_PW = createHash('sha224').update(UUID).digest('hex');

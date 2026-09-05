@@ -1,7 +1,6 @@
 {
-  "name": "proxy",
-  "version": "0.1.0",
-  "private": true,
+  "name": "tunnel-cfp",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
@@ -20,5 +19,7 @@
   "dependencies": {
     "dns-packet": "^5.6.1",
     "js-yaml": "^5.4.1"
-  }
+  },
+  "description": "Single Cloudflare Worker: VLESS tunnel + subscription manager + DoH + web proxy + WS bridge",
+  "license": "GPL-2.0"
 }

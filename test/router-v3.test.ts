@@ -25,7 +25,7 @@ const env = {
 } as unknown as Env;
 
 function req(path: string) {
-  return new Request(`https://cfp.lingion04.workers.dev${path}`);
+  return new Request(`https://worker.your-subdomain.workers.dev${path}`);
 }
 
 describe('v3 router', () => {

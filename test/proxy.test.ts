@@ -4,7 +4,7 @@ import { sanitizeRequestHeaders, buildTargetUrl, forward, BadTargetError } from 
 describe("sanitizeRequestHeaders", () => {
   it("strips host, cf-*, x-forwarded-*, content-length, accept-encoding; passes x-api-key through (upstream credential)", () => {
     const h = new Headers({
-      "Host": "proxy.qdp.qzz.io",
+      "Host": "proxy.example.com",
       "CF-Connecting-IP": "1.2.3.4",
       "X-Forwarded-For": "1.2.3.4",
       "X-Api-Key": "secret",
@@ -59,7 +59,7 @@ describe("buildTargetUrl", () => {
   it("joins path + incoming query, strips key", () => {
     const url = buildTargetUrl(
       "/https://api.target.com/v1/chat?stream=true",
-      "https://proxy.qdp.qzz.io/api/v1/fetch/https%3A%2F%2Fapi.target.com%2Fv1%2Fchat?stream=true&key=k"
+      "https://proxy.example.com/api/v1/fetch/https%3A%2F%2Fapi.target.com%2Fv1%2Fchat?stream=true&key=k"
     );
     expect(url.toString()).toBe("https://api.target.com/v1/chat?stream=true");
   });

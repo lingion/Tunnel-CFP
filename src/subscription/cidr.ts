@@ -21,7 +21,7 @@ export interface OptimizedNode {
   uuid: string;
   tls: boolean;
   network: 'ws';
-  sni: string;        // 默认 cfp.qdp.qzz.io
+  sni: string;        // 默认 worker.example.com(部署时经 opts.sni 传入真实域)
   'client-fingerprint': string;
   'ws-opts': {
     path: string;
@@ -31,7 +31,7 @@ export interface OptimizedNode {
 
 export interface OptimizeOpts {
   uuid?: string;             // 默认 '00000000-0000-4000-8000-000000000000'（vendor 占位符）
-  sni?: string;              // 默认 'cfp.qdp.qzz.io'
+  sni?: string;              // 默认 'worker.example.com'
   count?: number;            // 默认 64（实测落地加权 HKG40/LAX12/SEA12）
   path?: string;             // 默认 '/'
   cidrText?: string;         // 自定义 CIDR 文本（测试用）
@@ -175,7 +175,7 @@ function randomIpFromCidr(cidr: string): string {
 // 主入口：按权重分桶 + 抽 IP + 命名
 export function generateOptimizedNodes(opts: OptimizeOpts = {}): OptimizedNode[] {
   const uuid = opts.uuid ?? '00000000-0000-4000-8000-000000000000';
-  const sni = opts.sni ?? 'cfp.qdp.qzz.io';
+  const sni = opts.sni ?? 'worker.example.com';
   const path = opts.path ?? '/';
   const totalCount = opts.count ?? 64;
 

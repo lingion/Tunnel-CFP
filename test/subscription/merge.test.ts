@@ -101,8 +101,8 @@ describe('subscription normalization (vless URI list -> Clash config)', () => {
   const b64 = (s: string) => Buffer.from(s).toString('base64');
 
   const vlessList = [
-    'vless://b88ab8fa-392c-44b3-9343-612c11814708@104.17.125.64:2087?security=tls&type=ws&host=cfp.example.test&fp=chrome&sni=cfp.example.test&path=%2F&encryption=none#CF%E8%8A%82%E7%82%B9A',
-    'vless://b88ab8fa-392c-44b3-9343-612c11814708@www.visa.com.sg:80?type=ws&host=cfp.example.test&path=%2F%3Fed%3D2560&encryption=none#CF%E8%8A%82%E7%82%B9B',
+    'vless://12345678-1234-4123-8123-123456789abc@104.17.125.64:2087?security=tls&type=ws&host=cfp.example.test&fp=chrome&sni=cfp.example.test&path=%2F&encryption=none#CF%E8%8A%82%E7%82%B9A',
+    'vless://12345678-1234-4123-8123-123456789abc@www.visa.com.sg:80?type=ws&host=cfp.example.test&path=%2F%3Fed%3D2560&encryption=none#CF%E8%8A%82%E7%82%B9B',
   ].join('\n');
 
   it('normalizes base64 vless list into proxies', async () => {
@@ -116,7 +116,7 @@ describe('subscription normalization (vless URI list -> Clash config)', () => {
     expect(p1.type).toBe('vless');
     expect(p1.server).toBe('104.17.125.64');
     expect(p1.port).toBe(2087);
-    expect(p1.uuid).toBe('b88ab8fa-392c-44b3-9343-612c11814708');
+    expect(p1.uuid).toBe('12345678-1234-4123-8123-123456789abc');
     expect(p1.tls).toBe(true);
     expect(p1.network).toBe('ws');
     expect(p1['ws-opts'].headers.Host).toBe('cfp.example.test');

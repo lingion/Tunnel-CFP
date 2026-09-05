@@ -9,8 +9,9 @@
 // 整数/十六进制/八进制/短形式 IPv4 会被 URL 解析器规约成点分十进制,
 // 字面量正则对它们全部漏判(审计实锤),而 fetch 实际打的就是解析后的 host。
 
-// 生产域 + workers.dev 域都在自递归黑名单(生产域此前漏掉,可 /proxy/ 自己形成回环)
-export const SELF_HOSTS = ['cfp.qdp.qzz.io', 'cfp.lingion04.workers.dev'];
+// 自递归黑名单:部署后把你的自定义域 + workers.dev 域都加进来
+// (/proxy/ 指向自己会形成回环,worker 会自食流量)
+export const SELF_HOSTS = ['your-worker.your-subdomain.workers.dev'];
 
 export class SecurityError extends Error {
   constructor(public reason: string) {

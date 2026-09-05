@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleWebProxy } from '../../src/proxy-web/handler';
 import { rescueNavigation } from '../../src/proxy-web/rescue';
 
-const SELF = 'https://cfp.lingion04.workers.dev';
+const SELF = 'https://your-worker.your-subdomain.workers.dev';
 
 // waitUntil 收集器:cachePut 现在是后台写(生产走 ctx.waitUntil),
 // 测试里收集并在断言前 flush,避免跨测试 isolate 污染
@@ -176,7 +176,7 @@ describe('round2: query passing and base-url correctness', () => {
       return new Response('<html><head></head></html>', { headers: { 'Content-Type': 'text/html' } });
     }) as any);
     const res = await handleWebProxy(
-      new Request(`https://cfp.lingion04.workers.dev/proxy/${encodeURIComponent('https://target.com/search?q=abc&lang=zh')}`)
+      new Request(`https://your-worker.your-subdomain.workers.dev/proxy/${encodeURIComponent('https://target.com/search?q=abc&lang=zh')}`)
     );
     expect(res.status).toBe(200);
     expect(fetched).toContain('target.com/search?q=abc&lang=zh');
@@ -190,7 +190,7 @@ describe('round2: query passing and base-url correctness', () => {
     }) as any);
     // 浏览器对 action="/proxy/https://target.com/search" 提交后请求形态
     const res = await handleWebProxy(
-      new Request('https://cfp.lingion04.workers.dev/proxy/https://target.com/search?query=hello')
+      new Request('https://your-worker.your-subdomain.workers.dev/proxy/https://target.com/search?query=hello')
     );
     expect(res.status).toBe(200);
     expect(fetched).toContain('query=hello');
@@ -300,7 +300,7 @@ describe('round2: timeout + error page', () => {
       });
     }) as any);
     const pending = handleWebProxy(new Request(
-      'https://cfp.lingion04.workers.dev/proxy/' + encodeURIComponent('https://slow.com/x')
+      'https://your-worker.your-subdomain.workers.dev/proxy/' + encodeURIComponent('https://slow.com/x')
     ));
     // 模拟 30s 到点(CF runtime 会因 AbortSignal.timeout 触发同一 abort 路径)
     await vi.waitFor(() => expect(capturedSignal).not.toBeNull());
@@ -317,7 +317,7 @@ describe('round2: timeout + error page', () => {
       throw new TypeError('fetch failed: DNS resolution error');
     }) as any);
     const res = await handleWebProxy(new Request(
-      'https://cfp.lingion04.workers.dev/proxy/' + encodeURIComponent('https://broken.example/x')
+      'https://your-worker.your-subdomain.workers.dev/proxy/' + encodeURIComponent('https://broken.example/x')
     ));
     // round6 审计修正:DNS/连接失败语义是 502 Bad Gateway,504 仅留给超时
     expect(res.status).toBe(502);
@@ -445,46 +445,46 @@ describe('round4: no-transform on HTML', () => {
 
 describe('round5: navigation rescue for JS location redirects', () => {
   it('unproxied same-site path on cfp domain gets 302 to /proxy/ form', async () => {
-    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/articles/2', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/articles/1' },
+    const res = rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/articles/2', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/proxy/https://target.com/articles/1' },
     }));
     expect(res?.status).toBe(302);
     expect(res?.headers.get('Location')).toBe('/proxy/https://target.com/articles/2');
   });
 
   it('unproxied absolute-path with query also rescued', async () => {
-    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/search?q=x', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/page' },
+    const res = rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/search?q=x', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/proxy/https://target.com/page' },
     }));
     expect(res?.headers.get('Location')).toBe('/proxy/https://target.com/search?q=x');
   });
 
   it('no Referer → null (rescue must not over-trigger)', () => {
-    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/some/path'))).toBeNull();
+    expect(rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/some/path'))).toBeNull();
   });
 
   it('external Referer → null', () => {
-    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
+    expect(rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/x', {
       headers: { Referer: 'https://evil.example/page' },
     }))).toBeNull();
   });
 
   it('Referer without /proxy/ prefix on self domain → null', () => {
-    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/sub/all' },
+    expect(rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/x', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/sub/all' },
     }))).toBeNull();
   });
 
   it('rescue maps onto the REFERER target site', () => {
-    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/api/data', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://other.org/dashboard' },
+    const res = rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/api/data', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/proxy/https://other.org/dashboard' },
     }));
     expect(res?.headers.get('Location')).toBe('/proxy/https://other.org/api/data');
   });
 
   it('self-recursion target rejected inside rescue', () => {
-    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/proxy/https://other.org/x', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/proxy/https://target.com/page' },
+    const res = rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/proxy/https://other.org/x', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/proxy/https://target.com/page' },
     }));
     // 救援目标本身又含 /proxy/ 前缀的路径,validateTargetUrl 会拦(对象是 cfp 域?)—
     // 这里 path=/proxy/https://… 对 target.com 而言只是普通路径,应放行
@@ -494,9 +494,9 @@ describe('round5: navigation rescue for JS location redirects', () => {
 
 describe('round5b: origin-only Referer rescue via last-host cookie', () => {
   it('origin-only Referer + __proxy_last_host cookie → rescued', () => {
-    const res = rescueNavigation(new Request('https://cfp.lingion04.workers.dev/wiki/Main_Page', {
+    const res = rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/wiki/Main_Page', {
       headers: {
-        Referer: 'https://cfp.lingion04.workers.dev/',
+        Referer: 'https://your-worker.your-subdomain.workers.dev/',
         Cookie: '__proxy_last_host=en.wikipedia.org',
       },
     }));
@@ -505,8 +505,8 @@ describe('round5b: origin-only Referer rescue via last-host cookie', () => {
   });
 
   it('no cookie and origin-only Referer → null', () => {
-    expect(rescueNavigation(new Request('https://cfp.lingion04.workers.dev/x', {
-      headers: { Referer: 'https://cfp.lingion04.workers.dev/' },
+    expect(rescueNavigation(new Request('https://your-worker.your-subdomain.workers.dev/x', {
+      headers: { Referer: 'https://your-worker.your-subdomain.workers.dev/' },
     }))).toBeNull();
   });
 });
@@ -518,7 +518,7 @@ describe('round6: audit fixes', () => {
       fetched = String(input);
       return new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } });
     }) as any);
-    await handleWebProxy(new Request('https://cfp.lingion04.workers.dev/proxy/' + encodeURIComponent('https://target.com/page?existing=1') + '?key=SECRET123'));
+    await handleWebProxy(new Request('https://your-worker.your-subdomain.workers.dev/proxy/' + encodeURIComponent('https://target.com/page?existing=1') + '?key=SECRET123'));
     expect(fetched).not.toContain('SECRET123');
     expect(fetched).toContain('existing=1');
   });
@@ -682,10 +682,10 @@ describe('round6: audit fixes', () => {
 
   it('rescue skips WebSocket upgrade requests (面板 /connect 劫持修复)', async () => {
     const { rescueNavigation } = await import('../../src/proxy-web/rescue');
-    const req = new Request('https://cfp.lingion04.workers.dev/connect', {
+    const req = new Request('https://your-worker.your-subdomain.workers.dev/connect', {
       headers: {
         Upgrade: 'websocket',
-        Referer: 'https://cfp.lingion04.workers.dev/',
+        Referer: 'https://your-worker.your-subdomain.workers.dev/',
         Cookie: '__proxy_last_host=target.com',
       },
     });
@@ -694,9 +694,9 @@ describe('round6: audit fixes', () => {
 
   it('rescue rejects hostile __proxy_last_host values (非域名格式)', async () => {
     const { rescueNavigation } = await import('../../src/proxy-web/rescue');
-    const req = new Request('https://cfp.lingion04.workers.dev/x', {
+    const req = new Request('https://your-worker.your-subdomain.workers.dev/x', {
       headers: {
-        Referer: 'https://cfp.lingion04.workers.dev/',
+        Referer: 'https://your-worker.your-subdomain.workers.dev/',
         Cookie: '__proxy_last_host=2130706433',
       },
     });

@@ -1,92 +1,125 @@
-# proxy
+# Tunnel-CFP
 
-单 Cloudflare Worker：`/api/*` 走自建 gateway（Agent 转发 + 鉴权 + 流式直通），其余路径委派给 vendored edgetunnel（VLESS 节点 + 面板 + 订阅）。
+A single Cloudflare Worker that bundles a personal proxy stack:
 
-- 线上地址：`https://proxy.qdp.qzz.io`（custom domain）
-- Worker 名：`proxy`
-- 入口：`src/index.ts`；gateway 源码：`src/gateway/`；vendored 上游：`vendor/edgetunnel/_worker.js`
+- **VLESS tunnel** — WebSocket transport, TLS to the edge, random preferred-IP
+  nodes generated per subscription fetch
+- **Subscription endpoints** — Clash YAML / V2RayNG base64 link lists, with
+  node-pool stabilization (6h KV-cached IP pool), measured-colo naming
+  (`APAC-HKG-01` ...), and fake-country node stripping
+- **Web proxy** — browse any site through `/proxy/<url-encoded-target>` with
+  HTML rewriting, iframe srcdoc handling, cookie isolation, SSRF protection,
+  and a WebSocket bridge (`/proxy-ws/`)
+- **DoH server** — DNS-over-HTTPS (RFC 8484 wire format + JSON API)
 
-## 部署
+Deployable free on Cloudflare Workers (100k req/day).
 
-前置：`~/.cloudflare-token` 存放有效的 CLOUDFLARE_API_TOKEN。
+## Routes
+
+| Path | Function |
+|---|---|
+| `/proxy/<encoded-url>` | Web proxy (HTML/CSS/JS URL rewriting, cookies, SSRF-guarded) |
+| `/proxy-ws/<encoded-ws-url>` | WebSocket bridge (RFC 6455 client-masked framing) |
+| `/sub/edgetunnel?token=...` | V2RayNG base64 subscription (governed) |
+| `/sub/all?token=...` | Clash YAML subscription (all sources merged) |
+| `/sub/yonggekkk` | Alternative vendor subscription (raw) |
+| `/dns-query`, `/resolve` | DoH endpoints |
+| `/*` | Vendor panel + VLESS tunnel (edgetunnel-managed) |
+
+Subscription endpoints are token-gated: `token = MD5MD5(host + UUID)`.
+
+## Deploy
+
+Prereq: a Cloudflare account, a `CLOUDFLARE_API_TOKEN` with Workers + KV permissions.
 
 ```bash
-# 1. KV namespace（首次部署执行一次；已创建则跳过）
-export CLOUDFLARE_API_TOKEN=$(cat ~/.cloudflare-token)
-npx wrangler kv namespace create KV
-# 把输出 id 填入 wrangler.toml 的 kv_namespaces[0].id
+npm install
 
-# 2. typecheck + 全测试
+# 1. Create the KV namespace and put its id into wrangler.cfp.toml
+npx wrangler kv namespace create KV
+
+# 2. Set your node UUID in wrangler.cfp.toml [vars] (any valid UUIDv4)
+
+# 3. Typecheck + tests
 npx tsc --noEmit && npx vitest run
 
-# 3. 部署（routes 已在 wrangler.toml：proxy.qdp.qzz.io custom domain）
-npx wrangler deploy
+# 4. Deploy
+npx wrangler deploy -c wrangler.cfp.toml
 
-# 4. 注入 secrets（值在 ~/.proxy-secrets.env，本地 600 权限）
-source ~/.proxy-secrets.env
-echo "$ADMIN"     | npx wrangler secret put ADMIN
-echo "$AGENT_KEY" | npx wrangler secret put AGENT_KEY
+# 5. Secrets
+echo "<key>"   | npx wrangler secret put KEY       -c wrangler.cfp.toml   # vendor edgetunnel KEY
+echo "<admin>" | npx wrangler secret put ADMIN     -c wrangler.cfp.toml   # admin panel password
 ```
 
-部署验收（spec 成功标准 1/2）：
+The subscription token for your deployment: `MD5MD5(<your-domain> + <UUID>)` —
+same value the vendor panel shows for its own `/sub` link.
+
+## Architecture
+
+```
+src/index.ts                 entry: route dispatch
+├── src/proxy-web/           web proxy (fetch rewriting + WS bridge)
+│   ├── handler.ts           main /proxy handler, cache, timeouts
+│   ├── rewriter.ts          HTMLRewriter attribute/CSS URL rewriting
+│   ├── ws-bridge.ts         RFC 6455 frame codec + TCP pump
+│   ├── security.ts          SSRF guards (parsed-hostname validation)
+│   ├── url-resolver.ts      attribute decoding + path preservation
+│   ├── rescue.ts            JS-navigation referer rescue (302)
+│   └── auth.ts              PROXY_KEY gate
+├── src/subscription/        governed subscriptions
+│   ├── handler.ts           /sub/* routes, fake-country stripping
+│   ├── cidr.ts              CF CIDR pool → measured-colo named nodes
+│   ├── geo.ts               6h KV-cached stable node pool
+│   ├── merge.ts             multi-vendor merge + normalization
+│   ├── md5.ts / sha224.ts   crypto primitives (CF runtime lacks MD5)
+│   └── types.ts
+├── src/doh/                 DoH RFC 8484 + JSON API
+└── vendor/                  unmodified upstream code (see THIRD_PARTY_NOTICES.md)
+    ├── edgetunnel/_worker.js
+    └── yonggekkk/_worker.js
+```
+
+`vendor/` is treated as read-only: updates mean replacing the file and bumping
+the pinned-commit header. All governance (fake-CN stripping, colo naming, pool
+stabilization, SSRF, WS bridge hardening) lives in `src/`.
+
+## Tests
 
 ```bash
-curl -s https://proxy.qdp.qzz.io/api/v1/health
-# {"status":"ok","colo":"...","ts":...}
-
-curl -s -o /dev/null -w "%{http_code}\n" https://proxy.qdp.qzz.io/api/v1/fetch/https://example.com   # 401
-curl -s -o /dev/null -w "%{http_code}\n" -H "X-API-Key: $AGENT_KEY" \
-  https://proxy.qdp.qzz.io/api/v1/fetch/https://example.com                                          # 200
+npx vitest run                              # unit suite (173 tests)
+npx vitest run -c vitest.workers.config.ts  # workers-runtime suite (59 tests, miniflare)
 ```
 
-## Agent 调用示例
+SSRF (integer/hex/octal IPv4 bypasses), WS frame codec (mask bit, length
+classes, continuation frames), subscription merge/stripping, DoH wire-format
+round-trips.
 
-所有 gateway 端点带 `X-API-Key` 头（或 `?key=` query），key 即 `~/.proxy-secrets.env` 里的 `AGENT_KEY`。
+## Security notes
 
-转发任意 URL（路径后直接拼目标 URL，query 原样透传）：
+- Subscription endpoints are token-gated (the node UUID itself is the
+  credential; subscriptions never serve unauthenticated).
+- Web proxy blocks self-recursion (configurable `SELF_HOSTS` in
+  `src/proxy-web/security.ts`), IPv4 literals in any encoding, IPv6 literals,
+  and internal TLDs — validation runs on the *parsed* hostname.
+- WS bridge enforces client-side masking, frame-size caps, and serialized
+  writes per connection.
+- Set `PROXY_KEY` in `[vars]` to require a key/cookie gate on `/proxy*`.
 
-```bash
-curl -H "X-API-Key: $AGENT_KEY" https://proxy.qdp.qzz.io/api/v1/fetch/https://example.com
-curl -N -H "X-API-Key: $AGENT_KEY" "https://proxy.qdp.qzz.io/api/v1/fetch/https://httpbin.org/drip?duration=3&numbytes=3"
-```
+## Acknowledgements
 
-> 警示：用 `X-API-Key` 头方式调用时，网关会自动做**值级擦除**——转发前剔除所有值恰等于网关 key 的请求头，防止 key 泄给第三方目标站（其余头照传，上游 API 自己的凭据不受影响）。也可全程用 `?key=` 方式（推荐，URL 中该参数拼目标时会被剥离，天然不外泄）。
+This project stands on two excellent upstreams — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licenses and pinned
+versions:
 
-```bash
-source ~/.proxy-secrets.env
-export ANTHROPIC_BASE_URL="https://proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com?key=$AGENT_KEY"
-export ANTHROPIC_AUTH_TOKEN="<上游 Anthropic key>"
-# 客户端请求 → proxy.qdp.qzz.io/api/v1/fetch/https://api.anthropic.com/v1/messages
-# 网关校验 ?key= → 剥离 → 转发 https://api.anthropic.com/v1/messages（带 Claude Code 原有鉴权头），流式直通
-```
+- **[cmliu/edgetunnel](https://github.com/cmliu/edgetunnel)** (GPL-2.0) — the
+  tunnel core, admin panel, and subscription machinery
+- **[yonggekkk/Cloudflare-vless-trojan](https://github.com/yonggekkk/Cloudflare-vless-trojan)** —
+  alternative subscription format
 
-注：网关自身鉴权接受 `?key=` 时，该参数在拼目标 URL 阶段被剥离（`buildTargetUrl` 排除 `key`），不会泄给上游。
+Plus [cmliu/CF-CIDR.txt](https://github.com/cmliu/CF-CIDR.txt) for the
+Cloudflare CIDR snapshot used by the node pool.
 
-服务自述：`GET /api/v1`（无鉴权）返回 endpoints 列表；`GET /api/v1/health` 返回健康状态。
+## License
 
-## 客户端订阅
-
-edgetunnel 面板与订阅在 tunnel 侧（非 `/api/*` 路径）：
-
-1. 浏览器打开 `https://proxy.qdp.qzz.io/login`，输入面板密码（`~/.proxy-secrets.env` 的 `ADMIN`）。
-2. 面板内生成/复制订阅链接（形如 `https://proxy.qdp.qzz.io/sub?token=...`）。
-3. 客户端（Clash / Shadowrocket / v2rayN 等）添加订阅 URL 即可；`target=clash` 等参数用法以面板生成为准。
-
-手工添加 VLESS 节点（订阅不可用时的兜底）：
-
-- 地址：`proxy.qdp.qzz.io`
-- 端口：`443`
-- 传输：WebSocket（ws），TLS 开启
-- UUID：见 `wrangler.toml` `[vars] UUID`
-- ws 路径与其它参数以面板生成的节点配置为准
-
-## vendor 升级流程
-
-edgetunnel 上游更新时，替换 vendored 文件并保持委派方式不变：
-
-1. 从上游仓库（cmliu/edgetunnel）取最新 `_worker.js`，覆盖 `vendor/edgetunnel/_worker.js`。
-2. 在文件头部更新注释：上游版本号/commit 与替换日期（vendored JS 零修改，除头部注释外不做任何改动）。
-3. `npx tsc --noEmit && npx vitest run` 全绿后 `npx wrangler deploy`。
-4. 线上冒烟四项（health / 401 / 200 / `/` 返回 tunnel 页）确认 tunnel 侧未被破坏。
-
-注意：上游的 DO（Durable Object）导出不被本项目使用——`wrangler.toml` 不声明 DO 段，若升级后校验报 DO 相关错误，确认 `_worker.js` 中 DO 类未被入口要求即可。
+GPL-2.0 — see [LICENSE](LICENSE). Vendored components remain under their
+respective licenses as described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

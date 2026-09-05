@@ -5,11 +5,11 @@ import { describe, it, expect } from 'vitest';
 import { validateBridgeTarget } from '../../src/proxy-web/security-bridge';
 
 describe('validateBridgeTarget', () => {
-  it('blocks self host (workers.dev)', () => {
-    expect(() => validateBridgeTarget('cfp.lingion04.workers.dev')).toThrow(/recursion/i);
+  it('blocks self host (SELF_HOSTS entry)', () => {
+    expect(() => validateBridgeTarget('your-worker.your-subdomain.workers.dev')).toThrow(/recursion/i);
   });
-  it('blocks self host (production domain)', () => {
-    expect(() => validateBridgeTarget('cfp.qdp.qzz.io')).toThrow(/recursion/i);
+  it('blocks self host (subdomain)', () => {
+    expect(() => validateBridgeTarget('evil.your-worker.your-subdomain.workers.dev')).toThrow(/recursion/i);
   });
   it('blocks direct IPv4', () => {
     expect(() => validateBridgeTarget('169.254.169.254:80')).toThrow(/IP/);
