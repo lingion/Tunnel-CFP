@@ -273,7 +273,7 @@ function concatAll(parts: Uint8Array[]): Uint8Array {
 }
 
 /** 浏览器消息 → RFC6455 **客户端**帧(必须掩码,RFC 6455 §5.1;审计实锤) */
-function encodeClientFrame(payload: Uint8Array, opcode: number): Uint8Array {
+export function encodeClientFrame(payload: Uint8Array, opcode: number): Uint8Array {
   const len = payload.length;
   let header: Uint8Array;
   if (len < 126) {

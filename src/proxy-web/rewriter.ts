@@ -76,7 +76,11 @@ export function createRewriter(ctx: WebProxyContext): HTMLRewriter {
   });
 
   // <style> 块 — 文本流里逐 chunk 重写 CSS url()/@import
-  // text handler 收到的是流式分块,必须跨 chunk 缓冲:url( 可能在 chunk 边界断开
+  // text handler 收到的是流式分块,必须跨 chunk 缓冲:url( 可能在 chunk 边界断开。
+  // lastInTextNode() 是权威的"文本节点结束"信号(审计:旧启发式对注释/字符串里
+  // 的 url( 误 hold,元素结束时 hold 内容静默丢失;且每 chunk 对增长缓冲
+  // lastIndexOf 是 O(n²))。策略:仅当 chunk 是节点尾(lastInTextNode)才整块
+  // flush 重写;中途 chunk 用空串替换、内容全攒到尾部一次处理 — 每字节只扫一遍。
   {
     let cssBuf = '';
     let bufIsCss = false;
@@ -87,17 +91,15 @@ export function createRewriter(ctx: WebProxyContext): HTMLRewriter {
       },
       text(t: any) {
         if (!bufIsCss) return;
-        cssBuf += t.text;
-        // 尾部可能是半截 url( → 留到下一 chunk;简单启发:保留最后一个未闭合 url(
-        const lastOpen = cssBuf.lastIndexOf('url(');
-        const lastClose = cssBuf.lastIndexOf(')');
-        if (lastOpen > lastClose) {
-          const safe = cssBuf.slice(0, lastOpen);
-          t.replace(rewriteCssUrls(safe, ctx));
-          cssBuf = cssBuf.slice(lastOpen);
-        } else {
+        if (t.lastInTextNode) {
+          // 节点尾:整块 flush(含本 chunk),元素文本已完整,无 hold 丢失
+          cssBuf += t.text;
           t.replace(rewriteCssUrls(cssBuf, ctx));
           cssBuf = '';
+        } else {
+          // 中途 chunk:暂存(空串替换原位),等节点尾一次重写
+          cssBuf += t.text;
+          t.replace('');
         }
       },
     });

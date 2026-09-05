@@ -5,6 +5,16 @@ import { rescueNavigation } from '../../src/proxy-web/rescue';
 
 const SELF = 'https://cfp.lingion04.workers.dev';
 
+// waitUntil 收集器:cachePut 现在是后台写(生产走 ctx.waitUntil),
+// 测试里收集并在断言前 flush,避免跨测试 isolate 污染
+function makeWaitUntil() {
+  const tasks: Promise<any>[] = [];
+  const waitUntil = (p: Promise<any>) => tasks.push(p);
+  const flush = async () => { await Promise.allSettled(tasks); };
+  return { waitUntil, flush };
+}
+
+
 function proxyReq(target: string): Request {
   return new Request(`${SELF}/proxy/${encodeURIComponent(target)}`);
 }
@@ -365,13 +375,15 @@ describe('round3: redirect semantics', () => {
 
 describe('round3: header hygiene', () => {
   it('does not forward content-encoding when body was rewritten (css/js/html)', async () => {
+    const { waitUntil, flush } = makeWaitUntil();
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response('body{a:b}', {
         headers: { 'Content-Type': 'text/css', 'Content-Encoding': 'br' },
       })
     ) as any);
-    const res = await handleWebProxy(proxyReq('https://target.com/a.css'));
+    const res = await handleWebProxy(proxyReq('https://target.com/a.css'), waitUntil);
     expect(res.headers.get('Content-Encoding')).toBeNull();
+    await flush();
   });
 
   it('strips Sec-Fetch-* and CDN loop headers on the way out', async () => {

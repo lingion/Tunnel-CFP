@@ -14,7 +14,7 @@ function shimSource(): string {
 (function() {
   if (window.__PROXY_SHIM__) return;
   window.__PROXY_SHIM__ = true;
-  // __proxy_last_host 由服务端 baseInject script 写入(彼时 __PROXY_BASE__ 已就绪)
+  // __proxy_last_host 由服务端 Set-Cookie 写入(HttpOnly,页面 JS 不可读改)
   function BASE() { return window.__PROXY_BASE__ || ''; }  // getter:服务端 baseInject 在本 shim 之后才执行,不能启动时捕获
   var SKIP_RE = /^(data:|blob:|javascript:|about:|mailto:|tel:|#)/i;
   function toProxy(url) {

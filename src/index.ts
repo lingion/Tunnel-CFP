@@ -23,7 +23,8 @@ export default {
     if (url.pathname.startsWith("/proxy/")) {
       const denied = checkProxyAuth(request, env);
       if (denied) return denied;
-      return handleWebProxy(request);
+      // ctx.waitUntil:cachePut 后台写不阻塞响应(流式/视频 TTFB 修复)
+      return handleWebProxy(request, (p) => ctx.waitUntil(p));
     }
     if (url.pathname.startsWith("/proxy-ws/")) {
       const denied = checkProxyAuth(request, env);

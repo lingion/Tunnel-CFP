@@ -6,7 +6,7 @@ import { rewriteCssUrls, rewriteJsUrls, resolveToAbsolute } from './url-resolver
 import { validateTargetUrl, SecurityError } from './security';
 import type { WebProxyContext } from './types';
 
-export async function handleWebProxy(request: Request): Promise<Response> {
+export async function handleWebProxy(request: Request, waitUntil?: (p: Promise<any>) => void): Promise<Response> {
   const url = new URL(request.url);
 
   // path = /proxy/<encoded target url> (URI-encoded)
@@ -42,11 +42,15 @@ export async function handleWebProxy(request: Request): Promise<Response> {
     throw e;
   }
 
-  // 转发请求到目标:流式 body(duplex half,不缓冲)、30s 超时、Cache API 旁路
+  // 转发请求到目标:流式 body(duplex half,不缓冲)、超时、Cache API 旁路
   // caches 仅存在于 workers runtime;nodejs 测试环境降级为不缓存
   const hasCache = typeof caches !== 'undefined';
   const cache = hasCache ? caches.default : null;
-  const cacheable = hasCache && request.method === 'GET' && isCacheableAsset(target);
+  // 条件缓存:带 Cookie 的请求按会话个性化,一律 miss(防跨用户串号,审计口径)
+  const cacheable = hasCache && request.method === 'GET' && !request.headers.get('Cookie') && isCacheableAsset(target);
+  // cachePut 阻塞响应 = 缓存类资源(图片/字体/视频)TTFB = 全量下载(审计 Critical);
+  // 改 waitUntil 后台写,响应立即回流。nodejs 测试无 ctx 时退同步(测试断言依赖)
+  const defer = waitUntil ?? ((p: Promise<any>) => { void p; });
   let cachedResponse: Response | undefined;
   if (cache && cacheable) {
     cachedResponse = await cache.match(request);
@@ -68,7 +72,9 @@ export async function handleWebProxy(request: Request): Promise<Response> {
       // manual:跟随会丢 302 链上的 cookie 语义,且跨域 Location 会直连原站。
       // 由我们把 Location 重写成 /proxy/ 形态,浏览器自己跟
       redirect: 'manual',
-      signal: AbortSignal.timeout(30_000),
+      // 60s 罩整个 fetch 生命周期(headers+body)。30s 对慢速源站大文件会
+      // 中途掐断 body;而 cleanResponseHeaders 已删 CL,截断不可检测(审计 F6)
+      signal: AbortSignal.timeout(60_000),
     });
   } catch (e) {
     return errorPage(request, target, e as Error);
@@ -96,7 +102,7 @@ export async function handleWebProxy(request: Request): Promise<Response> {
       // 超限:重写不可行,透传剩余流(不缓冲)
       return passThroughWithRest(targetRes, finalUrl, body);
     }
-    return transformJsBody(targetRes, finalUrl, body, cache, cacheable ? request : null);
+    return transformJsBody(targetRes, finalUrl, body, cache, cacheable ? request : null, defer);
   }
 
   // CSS → 重写 body 内的 url()/@import(同 JS:有界缓冲)
@@ -109,7 +115,7 @@ export async function handleWebProxy(request: Request): Promise<Response> {
     const headers = cleanResponseHeaders(targetRes, new URL(finalUrl).host);
     const resp = new Response(rewritten, { status: targetRes.status, headers });
     if (cache && cacheable && targetRes.status === 200) {
-      return await cachePut(cache, request, resp);
+      return cachePut(cache, request, resp, defer);
     }
     return resp;
   }
@@ -117,7 +123,7 @@ export async function handleWebProxy(request: Request): Promise<Response> {
   // 其他资源(图片/字体/JS/JSON…)→ 透传
   const resp = passThrough(targetRes, new URL(finalUrl).host);
   if (cache && cacheable && targetRes.status === 200) {
-    return await cachePut(cache, request, resp);
+    return cachePut(cache, request, resp, defer);
   }
   return resp;
 }
@@ -178,21 +184,29 @@ function isCacheableAsset(target: string, _hint?: string): boolean {
   }
 }
 
-/** 缓存透传响应:tee 一份进缓存,另一份照常返回(body 只能消费一次) */
-async function cachePut(cache: Cache, request: Request, resp: Response): Promise<Response> {
-  try {
-    const [a, b] = resp.body ? resp.body.tee() : [null, null];
-    const forCache = new Response(a, resp);
-    // Cache API 尊重响应 Cache-Control;上游没给可缓存的 CC 时默认不存。
-    // 代理是缓存唯一写者,由我们定策略:1h 边缘缓存
-    if (!forCache.headers.has('Cache-Control')) {
-      forCache.headers.set('Cache-Control', 'public, s-maxage=3600');
+/**
+ * 缓存写入:tee 一份进缓存,**后台写不阻塞响应**(await put 会让视频/字体
+ * 的 TTFB = 全量下载时间,审计 Critical);另一份立即回流。
+ * Set-Cookie 先剥(CF Cache 对带 Set-Cookie 的 put 静默拒绝,永远存不进去)。
+ * request 引用 outside closure:tee 的 a 流消费发生在 waitUntil 窗口内。
+ */
+function cachePut(cache: Cache, request: Request, resp: Response, defer: (p: Promise<any>) => void): Response {
+  if (!resp.body) return resp;
+  const [a, b] = resp.body.tee();
+  defer((async () => {
+    try {
+      const forCache = new Response(a, resp);
+      forCache.headers.delete('Set-Cookie');
+      // 代理是缓存唯一写者,由我们定策略:1h 边缘缓存
+      if (!forCache.headers.has('Cache-Control')) {
+        forCache.headers.set('Cache-Control', 'public, s-maxage=3600');
+      }
+      await cache.put(request, forCache);
+    } catch {
+      /* 缓存失败不影响主流程(a 流被弃,workers 无泄漏问题) */
     }
-    const cachedHit = await cache.put(request, forCache);
-    return new Response(b, resp);
-  } catch {
-    return resp; // 缓存失败不影响主流程
-  }
+  })());
+  return new Response(b, resp);
 }
 
 /** 优雅错误页:超时/DNS 失败/连接拒绝分语义 — 504 仅超时,DNS/拒连是 502(审计) */
@@ -200,7 +214,7 @@ function errorPage(request: Request, target: string, e: Error): Response {
   const timedOut = /abort|timeout/i.test(e.name + e.message);
   const status = timedOut ? 504 : 502;
   const reason = timedOut
-    ? '30 秒内未收到响应,目标站可能不可达或过于缓慢。'
+    ? '60 秒内未收到响应,目标站可能不可达或过于缓慢。'
     : escapeHtml(e.message || '未知错误');
   const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>代理请求失败</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:90vh;margin:0;background:#f6f7f9;color:#1f2328}
@@ -238,12 +252,22 @@ async function transformHtml(targetRes: Response, finalUrl: string): Promise<Res
   const baseInject = new HTMLRewriter().on('head', {
     element(el: any) {
       el.prepend(
-        `<script>window.__PROXY_BASE__ = ${JSON.stringify(ctx.currentOrigin + ctx.currentPath)};` +
-        `try{document.cookie='__proxy_last_host='+new URL(window.__PROXY_BASE__).hostname+'; path=/; max-age=86400; SameSite=Lax'}catch(e){}</script>`,
+        `<script>window.__PROXY_BASE__ = ${JSON.stringify(ctx.currentOrigin + ctx.currentPath)};</script>`,
         { html: true },
       );
     },
   }).transform(targetRes);
+
+  // rescue 用的 __proxy_last_host 改服务端 Set-Cookie(旧 JS document.cookie 写入
+  // 无 HttpOnly,目标站 JS 可读可改 — 篡改成任意 host 就是 SSRF 跳板,审计 F3/F6)。
+  // HttpOnly + Secure;rescue 侧仍按域名格式白名单校验(深度防御)
+  const lastHost = targetUrl.hostname;
+  if (!newHeaders.has('Set-Cookie')) {
+    newHeaders.append(
+      'Set-Cookie',
+      `__proxy_last_host=${lastHost}; path=/; max-age=86400; SameSite=Lax; Secure; HttpOnly`,
+    );
+  }
 
   const rewriter = createRewriter(ctx);
   const transformed = rewriter.transform(baseInject);
@@ -283,6 +307,7 @@ async function transformJsBody(
   js: string,
   cache: Cache | null,
   cacheKey: Request | null,
+  defer: (p: Promise<any>) => void,
 ): Promise<Response> {
   const targetUrl = new URL(finalUrl);
   const ctx: WebProxyContext = {
@@ -293,7 +318,7 @@ async function transformJsBody(
   const headers = cleanResponseHeaders(targetRes, targetUrl.host);
   const resp = new Response(rewritten, { status: targetRes.status, headers });
   if (cache && cacheKey && targetRes.status === 200) {
-    return await cachePut(cache, cacheKey, resp);
+    return cachePut(cache, cacheKey, resp, defer);
   }
   return resp;
 }
@@ -310,10 +335,10 @@ async function rewriteCssResponse(targetRes: Response, finalUrl: string): Promis
 }
 
 function passThrough(targetRes: Response, targetHost: string): Response {
-  return new Response(targetRes.body, {
-    status: targetRes.status,
-    headers: cleanResponseHeaders(targetRes, targetHost),
-  });
+  // 透传 = body 原样(仍压缩):保 CE/CL。CL 保留使客户端可校验截断 +
+  // CF Cache match 才能对 Range 出 206(视频 seek,审计 F7)
+  const headers = cleanResponseHeaders(targetRes, targetHost, /* stripEncoding */ false);
+  return new Response(targetRes.body, { status: targetRes.status, headers });
 }
 
 /**
@@ -342,8 +367,11 @@ function cleanResponseHeaders(targetRes: Response, targetHost: string, stripEnco
   newHeaders.delete('Report-To');
   newHeaders.delete('NEL');
   newHeaders.delete('Reporting-Endpoints');
-  // 内容被重写后长度必变;透传时 body 虽原样但 Workers 会自动处理,保留会与实际不符
-  newHeaders.delete('Content-Length');
+  // 重写路径:内容长度必变,CL 必删。透传路径(stripEncoding=false,body 原样)
+  // CL 有效 — 保留它:客户端可校验截断 + Cache Range 匹配出 206(视频 seek)
+  if (stripEncoding) {
+    newHeaders.delete('Content-Length');
+  }
   isolateCookies(newHeaders, targetHost);
   return newHeaders;
 }
@@ -397,18 +425,19 @@ function unisolateCookies(headers: Headers, targetHost: string): Headers {
     const lower = k.toLowerCase();
     if (lower === 'cookie') {
       // 只还原当前目标站的 cookie;其他站的直接丢弃(防跨站携带)
+      // __Host- 前缀先判(更长):tag 自身以 'h' 开头时 `__pw<tag>_` 是
+      // `__pwh<tag>_` 的前缀,先判普通前缀会吞掉 host 类 cookie(还原成错名)
+      const wantHostPrefix = `${COOKIE_PREFIX}h${tag}_`;
       const parts = v.split(/;\s*/).filter(Boolean);
       const restored = parts
         .map((p) => {
           const eq = p.indexOf('=');
           const name = eq > 0 ? p.slice(0, eq).trim() : p;
-          if (name.startsWith(wantPrefix)) {
-            return `${name.slice(wantPrefix.length)}${p.slice(eq)}`;
-          }
-          // __Host- 类:写入时前缀为 __pwh<tag>_,还原为 __Host-原名
-          const wantHostPrefix = `${COOKIE_PREFIX}h${tag}_`;
           if (name.startsWith(wantHostPrefix)) {
             return `__Host-${name.slice(wantHostPrefix.length)}${p.slice(eq)}`;
+          }
+          if (name.startsWith(wantPrefix)) {
+            return `${name.slice(wantPrefix.length)}${p.slice(eq)}`;
           }
           return null;
         })
@@ -450,7 +479,9 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
       // URL 解析后 pathname 含 /proxy/https://...,query 挂尾)
       const m = r.pathname.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
       if (m) {
-        out.set('referer', `${m[1]}://${m[2]}${m[3] || ''}`);
+        // query 别丢:Referer 带目标站 query 时(站内跳转场景) stripping 会让
+        // 部分站 referer 校验/统计断链
+        out.set('referer', `${m[1]}://${m[2]}${m[3] || ''}${r.search}`);
       }
     } catch { /* 保原值 */ }
   }
