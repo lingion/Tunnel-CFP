@@ -190,22 +190,20 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
   if (referer) {
     try {
       const r = new URL(referer);
-      const m = r.pathname.match(/^\/proxy\/(https?):\/\/([^/]+)(.*)$/i) || r.pathname.match(/^\/proxy\/(https?):([^/]+)(.*)$/i);
-      if (r.host === new URL(target).host && r.pathname.startsWith('/proxy/')) {
-        const inner = decodeURIComponent(r.pathname.slice('/proxy/'.length)) + r.search;
-        out.set('referer', inner);
-      } else if (m) {
-        const inner = `${m[1]}://${m[2]}${m[3] || ''}`;
-        out.set('referer', inner);
+      // Referer 是目标站页面经浏览器写入的,实际形态是
+      // "https://cfp域/proxy/<完整url>"(浏览器会把整个 path+query 编码进 href,
+      // URL 解析后 pathname 含 /proxy/https://...,query 挂尾)
+      const m = r.pathname.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
+      if (m) {
+        out.set('referer', `${m[1]}://${m[2]}${m[3] || ''}`);
       }
     } catch { /* 保原值 */ }
   }
-  const origin = out.get('origin');
-  if (origin && origin.includes(new URL(target).protocol === 'https:' ? '' : '')) {
-    // Origin 只有在目标站做 CORS/CSRF 校验时才重要;代理语境下映射为目标站 origin
-    try {
-      out.set('origin', new URL(target).origin);
-    } catch { /* 保原值 */ }
-  }
+  // Origin 映射为目标站 origin(目标站的 CORS/CSRF 校验需要看到它自己的域)
+  try {
+    const tOrigin = new URL(target).origin;
+    const origin = out.get('origin');
+    if (origin && origin !== tOrigin) out.set('origin', tOrigin);
+  } catch { /* 保原值 */ }
   return out;
 }
