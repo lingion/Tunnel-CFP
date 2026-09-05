@@ -13,6 +13,11 @@ import { validateTargetUrl, SELF_HOSTS } from './security';
 export function rescueNavigation(request: Request): Response | null {
   const url = new URL(request.url);
 
+  // WS 升级请求不救援(edgetunnel 面板的 /connect WS 通道同源带 Referer,
+  // 302 对 WS 握手 = 直接连不上;审计实锤劫持面)
+  const upgrade = request.headers.get('Upgrade');
+  if (upgrade && /websocket/i.test(upgrade)) return null;
+
   // 已知自有路径不动(router 层的 /api /sub /dns-query /proxy /proxy-ws 不会走到这)
   const referer = request.headers.get('Referer');
   if (!referer) return null;
@@ -36,10 +41,13 @@ export function rescueNavigation(request: Request): Response | null {
   if (m) {
     targetOrigin = `${m[1]}://${m[2]}`;
   } else {
+    // 无 /proxy/ 形态 Referer(如 edgetunnel 面板自身路径)时,只有显式带
+    // cookie 才救 — 面板 fetch 场景 Referer 同源自带,旧 cookie 存留会把
+    // 面板 API 全部 302 打进代理(审计实锤),这里靠 upgrade 拦截 + 收紧放行
     const cookie = request.headers.get('Cookie') ?? '';
-    const cm = cookie.match(/(?:^|;\s*)__proxy_last_host=([^;]+)/);
+    const cm = cookie.match(/(?:^|;\s*)__proxy_last_host=([A-Za-z0-9.-]+\.[A-Za-z]{2,})/);
     if (!cm) return null;
-    targetOrigin = `https://${cm[1]!.trim()}`;
+    targetOrigin = `https://${cm[1]}`;
   }
   const rescueTarget = `${targetOrigin}${url.pathname}${url.search}`;
 
@@ -49,10 +57,14 @@ export function rescueNavigation(request: Request): Response | null {
     return null;
   }
 
+  // 透传 PROXY_KEY query(cookie 通道自动随域) — 启用 key 时否则救援 302 落到 401
+  const key = url.searchParams.get('key');
+  const location = `/proxy/${rescueTarget}${key ? `?key=${encodeURIComponent(key)}` : ''}`;
+
   return new Response(null, {
     status: 302,
     headers: {
-      Location: `/proxy/${rescueTarget}`,
+      Location: location,
       'Cache-Control': 'no-store',
     },
   });

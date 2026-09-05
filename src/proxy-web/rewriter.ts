@@ -1,7 +1,7 @@
 // src/proxy-web/rewriter.ts
 // HTMLRewriter 引擎:重写 HTML 中的外链资源为 /proxy/<url>
 // 覆盖:标准属性 / srcset / style属性 / <style>块 css / base / meta refresh+清除 meta CSP / 运行时 shim
-import { rewriteUrl, rewriteSrcset, rewriteCssUrls } from './url-resolver';
+import { rewriteUrl, rewriteSrcset, rewriteCssUrls, rewriteSrcdocHtml } from './url-resolver';
 import { SHIM_SCRIPT } from './inject-shim';
 import type { WebProxyContext } from './types';
 
@@ -31,8 +31,12 @@ const HTML_ATTR_RULES: AttrRule[] = [
   { tag: 'q', attr: 'cite' },
   { tag: 'del', attr: 'cite' },
   { tag: 'ins', attr: 'cite' },
-  { tag: 'longdesc', attr: 'cite' },
   { tag: 'html', attr: 'manifest' },
+  { tag: 'img', attr: 'longdesc' },
+  { tag: 'a', attr: 'ping' },
+  { tag: 'link', attr: 'imagesrc' },
+  { tag: 'source', attr: 'srcset' },
+  { tag: 'image', attr: 'href' }, // SVG <image href>
   { tag: 'use', attr: 'href' }, // SVG
 ];
 
@@ -47,6 +51,13 @@ export function createRewriter(ctx: WebProxyContext): HTMLRewriter {
       },
     });
   }
+  // SVG 老式 xlink:href(选择器需转义冒号)
+  rewriter = rewriter.on('image, use', {
+    element: (el: any) => {
+      const v = el.getAttribute('xlink:href');
+      if (v && !v.startsWith('#')) el.setAttribute('xlink:href', rewriteUrl(v, ctx));
+    },
+  });
 
   // srcset(img/source)— 响应式图片
   rewriter = rewriter.on('img[srcset], source[srcset]', {
@@ -101,6 +112,24 @@ export function createRewriter(ctx: WebProxyContext): HTMLRewriter {
         if (m) {
           el.setAttribute('content', `${m[1]}; url=${rewriteUrl(m[2].trim(), ctx)}`);
         }
+      }
+    },
+  });
+
+  // SRI(integrity)在内容重写后必校验失败 → 浏览器拦截脚本;全部剥除
+  rewriter = rewriter.on('[integrity]', {
+    element: (el: any) => {
+      el.removeAttribute('integrity');
+    },
+  });
+
+  // iframe srcdoc 内部也是 HTML,以 cfp 为 base 的相对 URL 全 404 → 重写其内容
+  rewriter = rewriter.on('iframe', {
+    element: (el: any) => {
+      const doc = el.getAttribute('srcdoc');
+      if (doc) {
+        const rewritten = rewriteSrcdocHtml(doc, ctx);
+        el.setAttribute('srcdoc', rewritten);
       }
     },
   });

@@ -9,12 +9,22 @@ export function checkProxyAuth(request: Request, env: { PROXY_KEY?: string }): R
   const key = env.PROXY_KEY;
   if (!key) return null; // 未启用
 
+  // 恒定时间比较:长度先泄(len 差异本身可见),逐字节 XOR 累积,
+  // 短路退出即 timing oracle(workers 网络抖动可淹没,但成本为零顺手修)
+  const safeEqual = (a: string, b: string): boolean => {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  };
+
   const url = new URL(request.url);
-  if (url.searchParams.get('key') === key) return null;
+  const qk = url.searchParams.get('key');
+  if (qk && safeEqual(qk, key)) return null;
 
   const cookie = request.headers.get('Cookie') ?? '';
   for (const part of cookie.split(/;\s*/)) {
-    if (part === `__proxy_key=${key}`) return null;
+    if (part.startsWith('__proxy_key=') && safeEqual(part.slice('__proxy_key='.length), key)) return null;
   }
 
   return new Response('Proxy requires auth key', { status: 401 });

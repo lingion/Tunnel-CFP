@@ -25,6 +25,8 @@ UUID = "b88ab8fa-392c-44b3-9343-612c11814708"
 
 [observability]
 enabled = true
+# 高流量被动代理:全量采样=每请求一条计费日志,非调试期降到 10%
+head_sampling_rate = 0.1
 
 # 部署命令:
 #   export CLOUDFLARE_API_TOKEN=$(cat ~/.cloudflare-token)

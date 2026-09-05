@@ -21,16 +21,23 @@ export async function handleWebProxy(request: Request): Promise<Response> {
   } catch {
     return new Response('Invalid URL encoding', { status: 400 });
   }
-  // 浏览器对 form GET / shim 拼接后的请求,query 会挂在 cfp 请求上;合入目标
+  // 浏览器对 form GET / shim 拼接后的请求,query 会挂在 cfp 请求上;合入目标。
+  // key 参数是本代理的用量闸凭证,绝不能转发给目标站
   if (url.search) {
-    target += (target.includes('?') ? '&' : '?') + url.search.slice(1);
+    const merged = new URLSearchParams(url.search);
+    merged.delete('key');
+    const flat = merged.toString();
+    if (flat) target += (target.includes('?') ? '&' : '?') + flat;
   }
 
   try {
     validateTargetUrl(target);
   } catch (e) {
     if (e instanceof SecurityError) {
-      return new Response(`Security error: ${e.message}`, { status: 400 });
+      return new Response(`Security error: ${e.message}`, {
+        status: 400,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
     }
     throw e;
   }
@@ -64,7 +71,7 @@ export async function handleWebProxy(request: Request): Promise<Response> {
       signal: AbortSignal.timeout(30_000),
     });
   } catch (e) {
-    return errorPage(target, e as Error);
+    return errorPage(request, target, e as Error);
   }
 
   // 3xx → Location 重写交还浏览器(opaqueredirect 无 Location 时按透传)
@@ -81,21 +88,25 @@ export async function handleWebProxy(request: Request): Promise<Response> {
     return transformHtml(targetRes, finalUrl);
   }
 
-  // JS → 字符串字面量内的绝对 URL 重写(≤5MB,防 CPU 爆;超限透传)
+  // JS → 字符串字面量内的绝对 URL 重写(有界缓冲,防 128MB isolate 爆;
+  // 无 Content-Length 时 chunked 常态,必须靠读流计数,不能信 !len 放行)
   if (isJsContentType(contentType)) {
-    const len = Number(targetRes.headers.get('Content-Length') ?? '0');
-    if (!len || len <= 5_000_000) {
-      return transformJs(targetRes, finalUrl, cache, cacheable ? request : null);
+    const body = await readBounded(targetRes, MAX_REWRITE_BYTES);
+    if (body === null) {
+      // 超限:重写不可行,透传剩余流(不缓冲)
+      return passThroughWithRest(targetRes, finalUrl, body);
     }
-    const resp = passThrough(targetRes, new URL(finalUrl).host);
-    return resp;
+    return transformJsBody(targetRes, finalUrl, body, cache, cacheable ? request : null);
   }
 
-  // CSS → 重写 body 内的 url()/@import
+  // CSS → 重写 body 内的 url()/@import(同 JS:有界缓冲)
   if (contentType.includes('text/css')) {
-    const rewritten = await rewriteCssResponse(targetRes, finalUrl);
+    const body = await readBounded(targetRes, MAX_REWRITE_BYTES);
+    if (body === null) {
+      return passThroughWithRest(targetRes, finalUrl, body);
+    }
+    const rewritten = rewriteCssUrls(body, cssCtx(finalUrl));
     const headers = cleanResponseHeaders(targetRes, new URL(finalUrl).host);
-    headers.delete('Content-Length');
     const resp = new Response(rewritten, { status: targetRes.status, headers });
     if (cache && cacheable && targetRes.status === 200) {
       return await cachePut(cache, request, resp);
@@ -111,11 +122,57 @@ export async function handleWebProxy(request: Request): Promise<Response> {
   return resp;
 }
 
-/** 可缓存判定:静态资源扩展名(HTML 不缓存 — 内容因上下文而异) */
+/** 重写路径缓冲上限:V8 UTF-16 实占×2,128MB isolate 共享,5MB 字节上限合理 */
+const MAX_REWRITE_BYTES = 5_000_000;
+
+/**
+ * 有界读 body:按字节计数,超过 cap 返回 null(流未被消费完)。
+ * Content-Length 可缺失/可伪造 — 计数是唯一可信口径。
+ */
+async function readBounded(res: Response, cap: number): Promise<string | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > cap) {
+      try { await reader.cancel(); } catch { /* already closed */ }
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.byteLength; }
+  return new TextDecoder().decode(all);
+}
+
+/**
+ * 超限降级:上游 body 已被 readBounded 取消,剩余内容拿不到 —
+ * 按错误页处理(透传已不可能,流已断)。502 带 size 提示。
+ */
+function passThroughWithRest(_res: Response, finalUrl: string, _body: null): Response {
+  void _res; void _body;
+  return new Response(
+    `Resource too large for proxy rewriting (>${MAX_REWRITE_BYTES} bytes): ${finalUrl}`,
+    { status: 502, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+  );
+}
+
+function cssCtx(finalUrl: string): WebProxyContext {
+  const u = new URL(finalUrl);
+  return { currentOrigin: `${u.protocol}//${u.host}`, currentPath: u.pathname };
+}
+
+/** 可缓存判定:静态资源扩展名(HTML/JSON 不缓存 — 内容因会话/上下文而异) */
 function isCacheableAsset(target: string, _hint?: string): boolean {
   try {
     const path = new URL(target).pathname;
-    return /\.(css|js|mjs|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|mp4|webm|mp3|json|xml|txt)$/i.test(path);
+    return /\.(css|js|mjs|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|mp4|webm|mp3)$/i.test(path);
   } catch {
     return false;
   }
@@ -138,9 +195,13 @@ async function cachePut(cache: Cache, request: Request, resp: Response): Promise
   }
 }
 
-/** 优雅错误页:超时/DNS 失败/目标 5xx 不裸抛,给可读页面 */
-function errorPage(target: string, e: Error): Response {
-  const timedOut = e instanceof Error && /abort|timeout/i.test(e.name + e.message);
+/** 优雅错误页:超时/DNS 失败/连接拒绝分语义 — 504 仅超时,DNS/拒连是 502(审计) */
+function errorPage(request: Request, target: string, e: Error): Response {
+  const timedOut = /abort|timeout/i.test(e.name + e.message);
+  const status = timedOut ? 504 : 502;
+  const reason = timedOut
+    ? '30 秒内未收到响应,目标站可能不可达或过于缓慢。'
+    : escapeHtml(e.message || '未知错误');
   const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>代理请求失败</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:90vh;margin:0;background:#f6f7f9;color:#1f2328}
 .card{max-width:520px;padding:40px;border-radius:12px;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.06)}
@@ -148,10 +209,12 @@ h1{font-size:20px;margin:0 0 12px}code{background:#f0f2f4;padding:2px 6px;border
 p{color:#57606a;font-size:14px;line-height:1.6}</style></head>
 <body><div class="card"><h1>${timedOut ? '目标站点响应超时' : '代理请求失败'}</h1>
 <p>目标:<code>${escapeHtml(target)}</code></p>
-<p>${timedOut ? '30 秒内未收到响应,目标站可能不可达或过于缓慢。' : escapeHtml(e.message || '未知错误')}</p>
+<p>${reason}</p>
 <p><a href="javascript:history.back()">← 返回上一页</a></p></div></body></html>`;
-  return new Response(html, {
-    status: 504,
+  // HEAD 不得有 body(RFC 9110 §9.3.2)
+  const body = request.method === 'HEAD' ? null : html;
+  return new Response(body, {
+    status,
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
   });
 }
@@ -213,10 +276,11 @@ function isJsContentType(ct: string): boolean {
   return /javascript|ecmascript|application\/jsx?\b/i.test(ct);
 }
 
-/** 读取并重写 JS 内字符串字面量 URL */
-async function transformJs(
+/** 重写 JS 文本中的字符串字面量 URL(body 已由 readBounded 有界读出) */
+async function transformJsBody(
   targetRes: Response,
   finalUrl: string,
+  js: string,
   cache: Cache | null,
   cacheKey: Request | null,
 ): Promise<Response> {
@@ -225,10 +289,8 @@ async function transformJs(
     currentOrigin: `${targetUrl.protocol}//${targetUrl.host}`,
     currentPath: targetUrl.pathname,
   };
-  const js = await targetRes.text();
   const rewritten = rewriteJsUrls(js, ctx);
   const headers = cleanResponseHeaders(targetRes, targetUrl.host);
-  headers.delete('Content-Length');
   const resp = new Response(rewritten, { status: targetRes.status, headers });
   if (cache && cacheKey && targetRes.status === 200) {
     return await cachePut(cache, cacheKey, resp);
@@ -273,6 +335,13 @@ function cleanResponseHeaders(targetRes: Response, targetHost: string, stripEnco
   newHeaders.delete('Cross-Origin-Opener-Policy');
   newHeaders.delete('Cross-Origin-Embedder-Policy');
   newHeaders.delete('Cross-Origin-Resource-Policy');
+  // HSTS/上报类策略头 pin 到 cfp 域=慢性污染+外呼泄漏,全部剥掉
+  newHeaders.delete('Strict-Transport-Security');
+  newHeaders.delete('Alt-Svc');
+  newHeaders.delete('Alt-Used');
+  newHeaders.delete('Report-To');
+  newHeaders.delete('NEL');
+  newHeaders.delete('Reporting-Endpoints');
   // 内容被重写后长度必变;透传时 body 虽原样但 Workers 会自动处理,保留会与实际不符
   newHeaders.delete('Content-Length');
   isolateCookies(newHeaders, targetHost);
@@ -308,8 +377,15 @@ function isolateCookies(headers: Headers, targetHost: string): void {
     if (eq <= 0) continue;
     const name = sc.slice(0, eq).trim();
     const rest = sc.slice(eq + 1);
-    // Path/Domain 保持,名字加 host 标签前缀
-    headers.append('Set-Cookie', `${COOKIE_PREFIX}${tag}_${name}=${rest}`);
+    // 剥 Domain(不匹配 cfp 域会被浏览器整条拒收)与 Path(cfp 域上不存在
+    // 目标站路径,Path 限定会导致 cookie 永不回发);__Host- 前缀随原名剥除
+    const attrs = rest.split(';').filter((a) => {
+      const t = a.trim().toLowerCase();
+      return !t.startsWith('domain=') && !t.startsWith('path=');
+    });
+    const isHostPrefix = /^__Host-/i.test(name);
+    const body = isHostPrefix ? name.slice(7) : name;
+    headers.append('Set-Cookie', `${COOKIE_PREFIX}${isHostPrefix ? 'h' : ''}${tag}_${body}=${attrs.join(';')}`);
   }
 }
 
@@ -328,6 +404,11 @@ function unisolateCookies(headers: Headers, targetHost: string): Headers {
           const name = eq > 0 ? p.slice(0, eq).trim() : p;
           if (name.startsWith(wantPrefix)) {
             return `${name.slice(wantPrefix.length)}${p.slice(eq)}`;
+          }
+          // __Host- 类:写入时前缀为 __pwh<tag>_,还原为 __Host-原名
+          const wantHostPrefix = `${COOKIE_PREFIX}h${tag}_`;
+          if (name.startsWith(wantHostPrefix)) {
+            return `__Host-${name.slice(wantHostPrefix.length)}${p.slice(eq)}`;
           }
           return null;
         })
