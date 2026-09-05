@@ -108,3 +108,37 @@ function rewriteCssValue(raw: string, ctx: RewriteContext): string {
   if (!abs) return raw;
   return `"${`/proxy/${abs}`}"`;
 }
+
+/** 这些 host 是 XML/JSON-LD 命名空间声明,不是可执行资源,重写会破坏语义 */
+const JS_URL_HOST_DENYLIST = [
+  'www.w3.org',
+  'w3.org',
+  'purl.org',
+  'schema.org',
+  'xmlns.mozilla.org',
+  'ns.adobe.com',
+];
+
+/**
+ * 重写 JS 文本中字符串字面量内的绝对 URL。
+ * 策略:只碰引号(" ' `)内以 https?:// 开头、以同款引号结束的完整字符串,
+ * 不做 AST 解析(Workers 上不现实),不碰代码位置的 / 分隔正则。
+ * 重写后放回同款引号内,语义保持字符串。
+ */
+export function rewriteJsUrls(js: string, ctx: RewriteContext): string {
+  // 模板串/单双引号统一处理:匹配 "..." '...' `...` 内部整体为 http(s) URL 的
+  return js.replace(/(['"`])(https?:\/\/[^'"`\\]+?)\1/g, (match, quote: string, url: string) => {
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return match;
+    }
+    for (const d of JS_URL_HOST_DENYLIST) {
+      if (host === d || host.endsWith('.' + d)) return match;
+    }
+    const abs = resolveToAbsolute(url, ctx);
+    if (!abs) return match;
+    return `${quote}/proxy/${abs}${quote}`;
+  });
+}

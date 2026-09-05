@@ -314,3 +314,80 @@ describe('round2: timeout + error page', () => {
     expect(body).toContain('DNS resolution error');
   });
 });
+
+describe('round3: JS URL rewriting', () => {
+  it('rewrites absolute URLs in .js responses', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(`var img="https://cdn.target.com/pic.png";var api='https://api.target.com/v1?x=1';`, {
+        headers: { 'Content-Type': 'application/javascript' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/static/app.js'));
+    const body = await res.text();
+    expect(body).toContain('"/proxy/https://cdn.target.com/pic.png"');
+    expect(body).toContain("'/proxy/https://api.target.com/v1?x=1'");
+  });
+
+  it('does not touch w3.org namespaces in JS', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(`var ns="http://www.w3.org/2000/svg";`, {
+        headers: { 'Content-Type': 'application/javascript' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/x.js'));
+    expect(await res.text()).toContain('http://www.w3.org/2000/svg');
+  });
+});
+
+describe('round3: redirect semantics', () => {
+  it('302 Location rewritten to /proxy/ form instead of auto-following', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(null, {
+        status: 302,
+        headers: { Location: 'https://target.com/landing?from=login' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/redirect-me'));
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/proxy/https://target.com/landing?from=login');
+  });
+
+  it('relative Location resolved against target origin', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(null, { status: 301, headers: { Location: '/new-path' } })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/old'));
+    expect(res.headers.get('Location')).toBe('/proxy/https://target.com/new-path');
+  });
+});
+
+describe('round3: header hygiene', () => {
+  it('does not forward content-encoding when body was rewritten (css/js/html)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('body{a:b}', {
+        headers: { 'Content-Type': 'text/css', 'Content-Encoding': 'br' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/a.css'));
+    expect(res.headers.get('Content-Encoding')).toBeNull();
+  });
+
+  it('strips Sec-Fetch-* and CDN loop headers on the way out', async () => {
+    let seen: Record<string, string> = {};
+    vi.stubGlobal('fetch', vi.fn(async (_t: any, init: any) => {
+      init.headers.forEach((v: string, k: string) => (seen[k] = v));
+      return new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } });
+    }) as any);
+    await handleWebProxy(new Request(proxyReq('https://target.com/').url, {
+      headers: {
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'navigate',
+        'Cdn-Loop': 'cloudflare',
+        'X-Forwarded-For': '1.2.3.4',
+      },
+    }));
+    expect(seen['sec-fetch-site']).toBeUndefined();
+    expect(seen['cdn-loop']).toBeUndefined();
+    expect(seen['x-forwarded-for']).toBeUndefined();
+  });
+});

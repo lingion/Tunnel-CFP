@@ -6,6 +6,7 @@ import { handleGateway } from "./gateway/router";
 import { handleDoh } from "./doh/handler";
 import { handleWebProxy } from "./proxy-web/handler";
 import { handleWsBridge } from "./proxy-web/ws-bridge";
+import { checkProxyAuth } from "./proxy-web/auth";
 import { handleSubscription } from "./subscription/handler";
 
 export default {
@@ -19,9 +20,13 @@ export default {
       return handleDoh(request, ctx);
     }
     if (url.pathname.startsWith("/proxy/")) {
+      const denied = checkProxyAuth(request, env);
+      if (denied) return denied;
       return handleWebProxy(request);
     }
     if (url.pathname.startsWith("/proxy-ws/")) {
+      const denied = checkProxyAuth(request, env);
+      if (denied) return denied;
       return handleWsBridge(request);
     }
     if (url.pathname.startsWith("/sub/")) {

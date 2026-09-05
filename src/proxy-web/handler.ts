@@ -2,7 +2,7 @@
 // /proxy/<encoded target url> 完整 HTML/CSS 重写代理
 // HTML → 属性/样式/shim 全量重写;CSS → body 内 url()/@import 重写;其他 → 透传
 import { createRewriter } from './rewriter';
-import { rewriteCssUrls } from './url-resolver';
+import { rewriteCssUrls, rewriteJsUrls, resolveToAbsolute } from './url-resolver';
 import { validateTargetUrl, SecurityError } from './security';
 import type { WebProxyContext } from './types';
 
@@ -58,11 +58,18 @@ export async function handleWebProxy(request: Request): Promise<Response> {
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
       // @ts-expect-error — workers types require manual duplex opt-in for streaming bodies
       duplex: 'half',
-      redirect: 'follow',
+      // manual:跟随会丢 302 链上的 cookie 语义,且跨域 Location 会直连原站。
+      // 由我们把 Location 重写成 /proxy/ 形态,浏览器自己跟
+      redirect: 'manual',
       signal: AbortSignal.timeout(30_000),
     });
   } catch (e) {
     return errorPage(target, e as Error);
+  }
+
+  // 3xx → Location 重写交还浏览器(opaqueredirect 无 Location 时按透传)
+  if (targetRes.status >= 300 && targetRes.status < 400) {
+    return transformRedirect(targetRes, target);
   }
 
   const contentType = targetRes.headers.get('Content-Type') || '';
@@ -72,6 +79,16 @@ export async function handleWebProxy(request: Request): Promise<Response> {
   // HTML → 全量重写
   if (contentType.includes('text/html')) {
     return transformHtml(targetRes, finalUrl);
+  }
+
+  // JS → 字符串字面量内的绝对 URL 重写(≤5MB,防 CPU 爆;超限透传)
+  if (isJsContentType(contentType)) {
+    const len = Number(targetRes.headers.get('Content-Length') ?? '0');
+    if (!len || len <= 5_000_000) {
+      return transformJs(targetRes, finalUrl, cache, cacheable ? request : null);
+    }
+    const resp = passThrough(targetRes, new URL(finalUrl).host);
+    return resp;
   }
 
   // CSS → 重写 body 内的 url()/@import
@@ -173,6 +190,48 @@ async function transformHtml(targetRes: Response, finalUrl: string): Promise<Res
   });
 }
 
+/** 3xx 响应:重写 Location 为 /proxy/ 形态;无 Location 的按透传处理 */
+function transformRedirect(targetRes: Response, target: string): Response {
+  const loc = targetRes.headers.get('Location');
+  const headers = cleanResponseHeaders(targetRes, new URL(target).host);
+  if (loc) {
+    const abs = resolveToAbsolute(loc, {
+      currentOrigin: new URL(target).origin,
+      currentPath: new URL(target).pathname,
+    });
+    headers.set('Location', `/proxy/${abs ?? loc}`);
+  }
+  return new Response(null, { status: targetRes.status, headers });
+}
+
+/** JS 内容判定:含常见 application/javascript 变体 */
+function isJsContentType(ct: string): boolean {
+  return /javascript|ecmascript|application\/jsx?\b/i.test(ct);
+}
+
+/** 读取并重写 JS 内字符串字面量 URL */
+async function transformJs(
+  targetRes: Response,
+  finalUrl: string,
+  cache: Cache | null,
+  cacheKey: Request | null,
+): Promise<Response> {
+  const targetUrl = new URL(finalUrl);
+  const ctx: WebProxyContext = {
+    currentOrigin: `${targetUrl.protocol}//${targetUrl.host}`,
+    currentPath: targetUrl.pathname,
+  };
+  const js = await targetRes.text();
+  const rewritten = rewriteJsUrls(js, ctx);
+  const headers = cleanResponseHeaders(targetRes, targetUrl.host);
+  headers.delete('Content-Length');
+  const resp = new Response(rewritten, { status: targetRes.status, headers });
+  if (cache && cacheKey && targetRes.status === 200) {
+    return await cachePut(cache, cacheKey, resp);
+  }
+  return resp;
+}
+
 /** 读取并重写 CSS 文本(相对路径以 CSS 文件自身为基准) */
 async function rewriteCssResponse(targetRes: Response, finalUrl: string): Promise<string> {
   const targetUrl = new URL(finalUrl);
@@ -191,9 +250,16 @@ function passThrough(targetRes: Response, targetHost: string): Response {
   });
 }
 
-/** 响应头清洗:CSP/XFO/嵌入限制剥离 + cookie 命名空间隔离 + 长度头修正 */
-function cleanResponseHeaders(targetRes: Response, targetHost: string): Headers {
+/**
+ * 响应头清洗:CSP/XFO/嵌入限制剥离 + cookie 命名空间隔离 + 长度头修正。
+ * stripEncoding=true(CSS/JS/HTML 重写路径):body 已被 Workers 解压+我们重写,
+ * content-encoding/content-length 必须剥,否则浏览器按压缩流解码必炸。
+ */
+function cleanResponseHeaders(targetRes: Response, targetHost: string, stripEncoding = true): Headers {
   const newHeaders = new Headers(targetRes.headers);
+  if (stripEncoding) {
+    newHeaders.delete('Content-Encoding');
+  }
   newHeaders.set('Access-Control-Allow-Origin', '*');
   // 去掉目标站点的 CSP/X-Frame-Options,否则代理页面被自身规则锁住
   newHeaders.delete('Content-Security-Policy');
@@ -280,7 +346,10 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
       lower === 'host' ||
       lower.startsWith('cf-') ||
       lower.startsWith('x-forwarded-') ||
-      lower === 'content-length'
+      lower.startsWith('sec-fetch-') ||
+      lower === 'cdn-loop' ||
+      lower === 'content-length' ||
+      lower === 'accept-encoding'
     ) {
       out.delete(k);
       continue;

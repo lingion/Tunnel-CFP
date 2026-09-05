@@ -64,8 +64,13 @@ export async function handleWsBridge(request: Request): Promise<Response> {
   await writer.write(new TextEncoder().encode(handshake));
   writer.releaseLock();
 
-  // TCP → WS:读 origin 响应流,解析 HTTP 头确认 101,之后按 WS 帧透传给浏览器
-  pumpSocketToWs(socket, server);
+  // RFC 6455: accept = base64(sha1(key + 258EAFA5-E914-47DA-95CA-C5AB0DC85B11))
+  const magic = key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(magic));
+  const acceptHash = btoa(String.fromCharCode(...new Uint8Array(digest)));
+
+  // TCP → WS:读 origin 响应流,校验 accept 后按 WS 帧透传给浏览器
+  void pumpSocketToWs(socket, server, acceptHash);
 
   // WS → TCP:浏览器每帧(base64/binary)写成原始字节泵给 socket
   server.addEventListener('message', async (ev: MessageEvent) => {
@@ -94,8 +99,10 @@ export async function handleWsBridge(request: Request): Promise<Response> {
   return new Response(null, { status: 101, webSocket: client });
 }
 
-/** TCP 流 → WS 帧:先等握手响应(101),再把后续字节按 WS 帧解析成消息 */
-function pumpSocketToWs(socket: any, ws: WebSocket): void {
+/** TCP 流 → WS 帧:等握手响应并校验 Sec-WebSocket-Accept,之后按 WS 帧解析成消息 */
+async function pumpSocketToWs(socket: any, ws: WebSocket, acceptHash: string): Promise<void> {
+  const enc = new TextEncoder();
+  void enc;
   (async () => {
     const reader = socket.readable.getReader();
     let buf: Uint8Array<ArrayBuffer> = new Uint8Array(0);
@@ -120,6 +127,13 @@ function pumpSocketToWs(socket: any, ws: WebSocket): void {
           const head = decoder.decode(merged.slice(0, headerEnd));
           if (!/^HTTP\/1\.1 101/i.test(head)) {
             ws.close(1002, 'origin handshake failed');
+            reader.releaseLock();
+            return;
+          }
+          // RFC 6455 §4.2.2:必须校验 Sec-WebSocket-Accept,防握手降级/误接非 WS 服务
+          const mAccept = head.match(/sec-websocket-accept:\s*(.+)/i);
+          if (!mAccept || mAccept[1]!.trim() !== acceptHash) {
+            ws.close(1002, 'bad sec-websocket-accept');
             reader.releaseLock();
             return;
           }

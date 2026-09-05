@@ -20,6 +20,8 @@ id = "e724e1591a33423ea603114a42f65984"
 [vars]
 # UUID 节点认证：v3 生成新 UUID（与原 worker 不共享，避免节点混淆）
 UUID = "b88ab8fa-392c-44b3-9343-612c11814708"
+# /proxy 与 /proxy-ws 用量闸:取消注释即启用(请求须带 ?key=值 或 Cookie: __proxy_key=值)
+# PROXY_KEY = "换成随机长随机串"
 
 [observability]
 enabled = true

@@ -1,6 +1,6 @@
 // test/proxy-web/url-resolver.test.ts
 import { describe, it, expect } from 'vitest';
-import { rewriteUrl, rewriteSrcset, rewriteCssUrls } from '../../src/proxy-web/url-resolver';
+import { rewriteUrl, rewriteSrcset, rewriteCssUrls, rewriteJsUrls } from '../../src/proxy-web/url-resolver';
 
 const ctx = { currentOrigin: 'https://example.com' };
 
@@ -79,5 +79,31 @@ describe('rewriteCssUrls', () => {
   });
   it('leaves url(#fragment) alone', () => {
     expect(rewriteCssUrls('filter:url(#foo)', ctx)).toBe('filter:url(#foo)');
+  });
+});
+
+describe('rewriteJsUrls', () => {
+  const jsCtx = { ...ctx, currentPath: '/static/app.js' };
+  it('rewrites absolute URLs inside string literals', () => {
+    const js = `var a="https://cdn.example.com/img.png";var b='https://other.org/api?v=1';`;
+    const out = rewriteJsUrls(js, jsCtx);
+    expect(out).toContain('"/proxy/https://cdn.example.com/img.png"');
+    expect(out).toContain("'/proxy/https://other.org/api?v=1'");
+  });
+  it('preserves URLs in non-string code positions (regex/comments untouched strings only)', () => {
+    const js = `// see https://docs.example.com/guide\nvar re = /https:\\/\\/regex.example.com/;`;
+    const out = rewriteJsUrls(js, jsCtx);
+    // 注释里也重写无害(不会被执行);regex 字面量里的 / 分隔串不在引号内 → 不动
+    expect(out).toContain('/https:\\/\\/regex.example.com/');
+  });
+  it('skips data: and already-proxied strings', () => {
+    const js = `var a="data:image/png;base64,AB";var b="/proxy/https://x.com/y";`;
+    const out = rewriteJsUrls(js, jsCtx);
+    expect(out).toBe(js);
+  });
+  it('skips JSON schema namespaces (w3.org etc are NOT executable urls)', () => {
+    // w3.org 是 schema 声明,重写会破坏 JSON-LD/JSX runtime — 黑名单豁免
+    const js = `var ctx="http://www.w3.org/2000/svg";`;
+    expect(rewriteJsUrls(js, jsCtx)).toBe(js);
   });
 });
