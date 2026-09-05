@@ -55,7 +55,7 @@ Tunnel-CFP 是一个 TypeScript Worker,部署在你自己的 Cloudflare 账号�
 
 ## WebSocket 桥的工作原理
 
-`/proxy-ws/` 终结浏览器 WebSocket,用 `cloudflare:sockets` 向源站开一条原始 TCP 连接,双向泵字节。难点在浏览器侧,实现严格对齐 RFC 6455:
+`/proxy-ws/` 终结浏览器 WebSocket,用 `cloudflare:sockets` 向源站开一条原始 TCP 连接,双向泵字节。难点在浏览器侧,实现逐条照着 RFC 6455 写:
 
 - **客户端掩码是强制的(RFC 6455 §5.1)。** 每个发往源站的帧都带掩码位和 `crypto.getRandomValues` 生成的新掩码键,payload 逐字节 XOR。长度类别(7-bit / 16-bit / 64-bit)按规范编码;text、binary、ping、pong、close 操作码原样保留。
 - **续帧重组。** 分片消息(opcode `0x0`)先缓冲再整条分发;控制帧夹在文本消息分片中间属于协议违例,以 close code 1002 断开。
