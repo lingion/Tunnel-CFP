@@ -39,3 +39,14 @@ describe('validateTargetUrl', () => {
     expect(() => validateTargetUrl('http://example.com')).not.toThrow();
   });
 });
+describe('self recursion: production domain', () => {
+  it('blocks cfp.qdp.qzz.io targets', () => {
+    expect(() => validateTargetUrl('https://cfp.qdp.qzz.io/proxy/x')).toThrow(/Self recursion/);
+  });
+  it('blocks subdomains of production domain', () => {
+    expect(() => validateTargetUrl('https://evil.cfp.qdp.qzz.io/')).toThrow(/Self recursion/);
+  });
+  it('still allows unrelated qdp hosts', () => {
+    expect(() => validateTargetUrl('https://gh.qdp.qzz.io/foo')).not.toThrow();
+  });
+});

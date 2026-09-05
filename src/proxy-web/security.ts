@@ -4,7 +4,8 @@
 //   2. 直连 IP（防 SSRF 到 169.254.169.254 / 127.0.0.1 等）
 //   3. 协议白名单（仅 http/https）
 
-export const SELF_HOST = 'cfp.lingion04.workers.dev';
+// 生产域 + workers.dev 域都在自递归黑名单(生产域此前漏掉,可 /proxy/ 自己形成回环)
+export const SELF_HOSTS = ['cfp.qdp.qzz.io', 'cfp.lingion04.workers.dev'];
 const IPV4_REGEX = /^https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/;
 const IPV6_HOST_REGEX = /^\[[0-9a-f:]+\]/i;
 
@@ -27,8 +28,10 @@ export function validateTargetUrl(target: string): void {
     throw new SecurityError(`Unsupported protocol: ${url.protocol}`);
   }
 
-  if (url.hostname === SELF_HOST || url.hostname.endsWith('.' + SELF_HOST)) {
-    throw new SecurityError('Self recursion detected');
+  for (const self of SELF_HOSTS) {
+    if (url.hostname === self || url.hostname.endsWith('.' + self)) {
+      throw new SecurityError('Self recursion detected');
+    }
   }
 
   if (IPV4_REGEX.test(target) || IPV6_HOST_REGEX.test(url.hostname)) {
