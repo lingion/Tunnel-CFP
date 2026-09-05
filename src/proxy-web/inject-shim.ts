@@ -110,6 +110,16 @@ function shimSource(): string {
       return _beacon(toProxy(url), data);
     };
   }
+  // HTMLFormElement.submit():JS 直调不走 action 属性改写,单独钩
+  var _submit = HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit = function() {
+    var a = this.getAttribute('action');
+    if (a) {
+      var na = toProxy(a);
+      if (na !== a) this.setAttribute('action', na);
+    }
+    return _submit.apply(this, arguments);
+  };
 })();
 `;
 }

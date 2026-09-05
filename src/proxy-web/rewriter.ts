@@ -105,6 +105,14 @@ export function createRewriter(ctx: WebProxyContext): HTMLRewriter {
     },
   });
 
+  // 剥 CF 自动注入的 RUM beacon(平台在浏览器请求时插到 </body> 前,
+  // 外域直连 + 拖住 load 事件 + 对 cfp 域上报 — 代理站全都不想要)
+  rewriter = rewriter.on('script[src*="cloudflareinsights.com"]', {
+    element: (el: any) => {
+      el.remove();
+    },
+  });
+
   // 清除 meta CSP(响应头 CSP 在 handler 里剥,meta 形式在这里剥)
   rewriter = rewriter.on('meta[http-equiv="Content-Security-Policy"], meta[http-equiv="content-security-policy"]', {
     element: (el: any) => {

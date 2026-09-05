@@ -183,6 +183,9 @@ async function transformHtml(targetRes: Response, finalUrl: string): Promise<Res
 
   const rewriter = createRewriter(ctx);
   const transformed = rewriter.transform(baseInject);
+  // no-transform:CF 边缘见此头会跳过自动 RUM beacon 注入(官方 FAQ 语义),
+  // 否则注入的 cloudflareinsights 脚本外域直连 + 拖住 load 事件
+  newHeaders.set('Cache-Control', 'no-transform');
   // HTMLRewriter.transform 不改变 body 长度无关性,但内容已变 → 必须不带 content-length
   return new Response(transformed.body, {
     status: targetRes.status,

@@ -391,3 +391,40 @@ describe('round3: header hygiene', () => {
     expect(seen['x-forwarded-for']).toBeUndefined();
   });
 });
+
+describe('round4: RUM beacon strip + form.submit hook', () => {
+  it('strips cloudflareinsights beacon script from HTML', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('<html><body><p>x</p><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/vabc" data-cf-beacon="{&quot;t&quot;:1}"></script></body></html>', {
+        headers: { 'Content-Type': 'text/html' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/'));
+    const body = await res.text();
+    expect(body).not.toContain('cloudflareinsights');
+    expect(body).toContain('<p>x</p>');
+  });
+
+  it('keeps normal scripts intact while stripping beacon', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('<html><body><script src="/proxy/https://target.com/app.js"></script><script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script></body></html>', {
+        headers: { 'Content-Type': 'text/html' },
+      })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/'));
+    const body = await res.text();
+    expect(body).toContain('app.js');
+    expect(body).not.toContain('cloudflareinsights');
+  });
+});
+
+describe('round4: no-transform on HTML', () => {
+  it('adds Cache-Control no-transform to rewritten HTML so CF edge skips beacon injection', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('<html><body>x</body></html>', { headers: { 'Content-Type': 'text/html' } })
+    ) as any);
+    const res = await handleWebProxy(proxyReq('https://target.com/'));
+    const cc = res.headers.get('Cache-Control') ?? '';
+    expect(cc).toContain('no-transform');
+  });
+});
