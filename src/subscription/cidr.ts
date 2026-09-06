@@ -73,7 +73,7 @@ const CF_PORTS = [443, 2053, 2083, 2087, 2096, 8443] as const;
 // 但通过手工划分（参照 CF PoP 实际所在 + 公开 IP 段公开归属文档），足够"不骗人"。
 // 没匹配到的段归 HKG（104.x 主力段所在）。
 // 废段(对自用 host 报 1034)不入池:162.159.32/20 · 162.159.38/23 · 108.162.198/24 · 198.41.208/23
-const CIDR_BUCKETS: Record<string, Bucket> = {
+export const CIDR_BUCKETS: Record<string, Bucket> = {
   // 2026-09-04 家宽(111.43.134.102, China Mobile)实测落地 colo,curl --resolve + /cdn-cgi/trace
   // APAC-HKG:104.x 大段 + 172.66/22 全部落香港
   '104.16.144.0/20': 'APAC-HKG',

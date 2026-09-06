@@ -53,6 +53,102 @@ describe('geoip country lookup', () => {
     vi.unstubAllGlobals();
   });
 
+  it('single IP endpoint URL is /json/{ip}?fields=... (省带宽)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      // 验证：URL 含 ?fields=status,message,countryCode
+      expect(url).toMatch(/\/json\/[^/]+\?fields=status,message,countryCode$/);
+      return new Response(JSON.stringify({ status: 'success', countryCode: 'JP' }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { lookupCountry } = await import('../../src/subscription/geoip');
+    const cc = await lookupCountry('8.8.8.8');
+    expect(cc).toBe('JP');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('batch endpoint URL is /batch (not /json/batch)', async () => {
+    const fetchMock = vi.fn(async (url: string, opts?: RequestInit) => {
+      // 关键回归：路径必须是 ip-api.com/batch，不能带 /json/
+      expect(url).toBe('http://ip-api.com/batch');
+      expect(url).not.toContain('/json/batch');
+      const body = JSON.parse((opts?.body ?? '[]') as string);
+      return new Response(JSON.stringify(body.map((b: any) => ({ status: 'success', countryCode: 'US' }))), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { lookupCountryBatch } = await import('../../src/subscription/geoip');
+    const result = await lookupCountryBatch(['1.1.1.1', '8.8.8.8']);
+    expect(result.get('1.1.1.1')).toBe('US');
+    expect(result.get('8.8.8.8')).toBe('US');
+    vi.unstubAllGlobals();
+  });
+
+  it('buildCidrMatcher: CF anycast IP 走本地映射（绕过 ip-api 的 CA 误判）', async () => {
+    const { buildCidrMatcher } = await import('../../src/subscription/geoip');
+    // 形状与 cidr.ts CIDR_BUCKETS 一致：{ cidr → bucket }
+    const cidrToBucket = {
+      '1.0.1.0/24': 'APAC-HKG',
+      '1.0.2.0/24': 'NA-LAX',
+    } as const;
+    const matcher = buildCidrMatcher(cidrToBucket as any, {
+      'APAC-HKG': 'HK',
+      'NA-LAX': 'US',
+    });
+    expect(matcher('1.0.1.5')).toBe('HK'); // APAC-HKG 段 → HK
+    expect(matcher('1.0.2.10')).toBe('US'); // NA-LAX 段 → US
+    expect(matcher('8.8.8.8')).toBeNull();  // 不在任何段 → null
+  });
+
+  it('buildCidrMatcher: 不在 bucketToCountry 内的 bucket 被跳过（不浪费匹配时间）', async () => {
+    const { buildCidrMatcher } = await import('../../src/subscription/geoip');
+    const cidrToBucket = {
+      '1.0.1.0/24': 'APAC-HKG',
+      '2.0.0.0/24': 'UNUSED-BUCKET', // 不在 bucketToCountry
+    } as const;
+    const matcher = buildCidrMatcher(cidrToBucket as any, { 'APAC-HKG': 'HK' });
+    expect(matcher('1.0.1.5')).toBe('HK');
+    expect(matcher('2.0.0.5')).toBeNull(); // UNUSED-BUCKET 被跳过
+  });
+
+  it('lookupCountryBatch 接受 cidrMatcher：CIDR 命中则不查 ip-api', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { lookupCountryBatch, buildCidrMatcher } = await import('../../src/subscription/geoip');
+    const matcher = buildCidrMatcher(
+      { '1.0.1.0/24': 'APAC-HKG' } as any,
+      { 'APAC-HKG': 'HK' },
+    );
+    const result = await lookupCountryBatch(['1.0.1.5', '1.0.1.99'], matcher);
+    expect(result.get('1.0.1.5')).toBe('HK');
+    expect(result.get('1.0.1.99')).toBe('HK');
+    // 两个 IP 都命中 CIDR → 不应发 fetch
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    vi.unstubAllGlobals();
+  });
+
+  it('lookupCountriesCached 接受 cidrMatcher：CIDR 命中直接返回，不查 KV', async () => {
+    const kv = new MemKV();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { lookupCountriesCached, buildCidrMatcher } = await import('../../src/subscription/geoip');
+    const matcher = buildCidrMatcher(
+      { '162.158.0.0/16': 'NA-SEA' } as any,
+      { 'NA-SEA': 'US' },
+    );
+    const env = { KV: kv } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const result = await lookupCountriesCached(['162.158.1.1'], env, ctx, matcher);
+    expect(result.get('162.158.1.1')).toBe('US');
+    // CIDR 命中 → 不查 KV、不查 ip-api
+    expect(kv.store.size).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    vi.unstubAllGlobals();
+  });
+
   it('batch lookupCountryBatch groups IPs (max 100 per /batch call)', async () => {
     const fetchMock = vi.fn(async (url: string, opts?: RequestInit) => {
       // /batch 接受 JSON body [{query, fields}, ...]

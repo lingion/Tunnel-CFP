@@ -6,9 +6,17 @@
 import * as yaml from 'js-yaml';
 import { mergeSubscriptionPayloads } from './merge';
 import { getGeoNamedNodes } from './geo';
-import { type OptimizedNode } from './cidr';
+import { type OptimizedNode, CIDR_BUCKETS } from './cidr';
 import { md5md5 } from './md5';
-import { lookupCountriesCached } from './geoip';
+import { lookupCountriesCached, buildCidrMatcher } from './geoip';
+
+// 自研 CF 段 → country code（实测映射）
+// ip-api 看 CF anycast IP 会返 CA 等错值，必须本地绕过
+const CF_BUCKET_TO_COUNTRY: Record<string, string> = {
+  'APAC-HKG': 'HK',
+  'NA-LAX': 'US',
+  'NA-SEA': 'US',
+};
 import type { ProxyDef } from './types';
 
 export async function handleSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -176,7 +184,7 @@ function collectIpsFromYamlTexts(texts: string[]): string[] {
   return [...ips];
 }
 
-// 从多份 yaml 文本提取 IP → KV 缓存 + ip-api batch → 返回 (ip) => cc 闭包
+// 从多份 yaml 文本提取 IP → 本地 CIDR + KV 缓存 + ip-api batch → 返回 (ip) => cc 闭包
 // hostname 节点、geoip 失败、cache miss 一律返回 null（落到 🌐其他 兜底）
 async function makeLookupCountry(
   yamlTexts: string[],
@@ -185,7 +193,8 @@ async function makeLookupCountry(
 ): Promise<(ip: string) => string | null> {
   const ips = collectIpsFromYamlTexts(yamlTexts);
   if (ips.length === 0) return () => null;
-  const map = await lookupCountriesCached(ips, env, ctx);
+  const cidrMatcher = buildCidrMatcher(CIDR_BUCKETS, CF_BUCKET_TO_COUNTRY);
+  const map = await lookupCountriesCached(ips, env, ctx, cidrMatcher);
   return (ip) => map.get(ip) ?? null;
 }
 
