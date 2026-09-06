@@ -1,5 +1,5 @@
 // test/subscription/geoip.test.ts
-// vendor 节点真实 IP 归属查询（ip-api.com /batch + KV 缓存 6h）
+// vendor 节点真实 IP 归属查询（ip-api.com /batch + KV 缓存 24h）
 // 用于按 Google/巴哈/Google Play 实际看到的 country 分桶
 import { describe, it, expect, vi } from 'vitest';
 import type { ExecutionContext } from '@cloudflare/workers-types';
@@ -36,7 +36,7 @@ describe('geoip country lookup', () => {
     vi.unstubAllGlobals();
   });
 
-  it('caches country lookup in KV for 6h', async () => {
+  it('caches country lookup in KV for 24h', async () => {
     const kv = new MemKV();
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: 'success', countryCode: 'TW' }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
