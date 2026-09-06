@@ -354,4 +354,74 @@ proxy-groups:
     expect(buckets.get('🇹🇼 台湾')).toEqual(['TW_5.0.0.1']);
     expect(buckets.get('🇸🇬 新加坡')).toEqual(['SG_6.0.0.1']);
   });
+
+  it('all 29 region groups exist in proxy-groups even when empty (空桶也要占位)', async () => {
+    // 用户用例：分组必须存在，哪怕暂时没节点。否则巴哈姆特/Play 日区突然想用时找不到入口
+    // 29 = 7 PRIMARY (TW/HK/JP/US/CN/KR/SG) + 22 SECONDARY (GB/DE/FR/AU/CA/IN/TH/VN/MY/PH/ID/BR/NL/IT/ES/SE/NO/FI/CH/PL/RU/TR)
+    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
+    const out = mergeSubscriptionPayloads([b64('vless://u@a:443?encryption=none#lonely_node')]);
+    const parsed: any = (await import('js-yaml')).load(out);
+    const names = parsed['proxy-groups'].map((g: any) => g.name);
+    // 7 PRIMARY 必须存在
+    expect(names).toContain('🇹🇼 台湾');
+    expect(names).toContain('🇭🇰 香港');
+    expect(names).toContain('🇯🇵 日本');
+    expect(names).toContain('🇺🇸 美国');
+    expect(names).toContain('🇨🇳 中国大陆');
+    expect(names).toContain('🇰🇷 韩国');
+    expect(names).toContain('🇸🇬 新加坡');
+    // 22 SECONDARY 必须存在
+    expect(names).toContain('🇬🇧 英国');
+    expect(names).toContain('🇩🇪 德国');
+    expect(names).toContain('🇫🇷 法国');
+    expect(names).toContain('🇦🇺 澳大利亚');
+    expect(names).toContain('🇨🇦 加拿大');
+    expect(names).toContain('🇮🇳 印度');
+    expect(names).toContain('🇹🇭 泰国');
+    expect(names).toContain('🇻🇳 越南');
+    expect(names).toContain('🇲🇾 马来西亚');
+    expect(names).toContain('🇵🇭 菲律宾');
+    expect(names).toContain('🇮🇩 印度尼西亚');
+    expect(names).toContain('🇧🇷 巴西');
+    expect(names).toContain('🇳🇱 荷兰');
+    expect(names).toContain('🇮🇹 意大利');
+    expect(names).toContain('🇪🇸 西班牙');
+    expect(names).toContain('🇸🇪 瑞典');
+    expect(names).toContain('🇳🇴 挪威');
+    expect(names).toContain('🇫🇮 芬兰');
+    expect(names).toContain('🇨🇭 瑞士');
+    expect(names).toContain('🇵🇱 波兰');
+    expect(names).toContain('🇷🇺 俄罗斯');
+    expect(names).toContain('🇹🇷 土耳其');
+  });
+
+  it('空桶分组用 select 类型（url-test 空 proxies 必崩）', async () => {
+    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
+    const out = mergeSubscriptionPayloads([b64('vless://u@a:443?encryption=none#lonely_node')]);
+    const parsed: any = (await import('js-yaml')).load(out);
+    // 没日本节点 → 🇯🇵 日本 必须是 select（不是 url-test）
+    const jp = parsed['proxy-groups'].find((g: any) => g.name === '🇯🇵 日本');
+    expect(jp.type).toBe('select');
+    expect(jp.proxies).toEqual([]); // 空桶不挂节点
+    // 没美国节点 → 🇺🇸 美国 也是 select
+    const us = parsed['proxy-groups'].find((g: any) => g.name === '🇺🇸 美国');
+    expect(us.type).toBe('select');
+    expect(us.proxies).toEqual([]);
+  });
+
+  it('有节点的分组用 url-test 类型 + gstatic 健康检查', async () => {
+    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
+    const out = mergeSubscriptionPayloads([b64('vless://u@a:443?encryption=none#TW_5.0.0.1')]);
+    const parsed: any = (await import('js-yaml')).load(out);
+    // 但 geoip lookupCountry 返回 null（mergeSubscriptionPayloads 默认 lookup=() => null），
+    // 所以这里桶里也没节点——再换一种：直接调 cfpStandardGroups 注入 fakeGeo
+    const { cfpStandardGroups } = await import('../../src/subscription/merge');
+    const proxies = [{ name: 'TW_5.0.0.1', server: '5.0.0.1', port: 443, type: 'vless' }];
+    const groups = cfpStandardGroups(proxies, (ip) => (ip === '5.0.0.1' ? 'TW' : null));
+    const tw = groups.find((g: any) => g.name === '🇹🇼 台湾');
+    expect(tw).toBeDefined();
+    expect(tw!.type).toBe('url-test');
+    expect(tw!.url).toBe('http://www.gstatic.com/generate_204');
+    expect(tw!.proxies).toEqual(['TW_5.0.0.1']);
+  });
 });

@@ -346,7 +346,7 @@ proxies:
     }
   });
 
-  it('hostnames (non-IP server) are not geoip-queried; fall to 🌐其他 via bucketNodesByGeo', async () => {
+  it('hostnames (non-IP server) are not geoip-queried; fall to 🌐其他 via bucketNodesByGeo; region groups still emitted as empty placeholders', async () => {
     setupWithGeo({}); // 空 geo = 全部 unknown
     vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
       default: { fetch: vi.fn(async () => new Response(`
@@ -364,12 +364,26 @@ proxies:
     const text = await res.text();
     const parsed: any = (await import('js-yaml')).load(text);
     const groupNames = parsed['proxy-groups'].map((g: any) => g.name);
-    // hostname 不发 geoip → 无 country 组
-    expect(groupNames).not.toContain('🇹🇼 台湾');
-    expect(groupNames).not.toContain('🇭🇰 香港');
+    // 用户用例："分组里面可以没有东西 但不能没有这个分组"
+    // hostname → 🌐其他 fallback → 28 个地区分组依然占位发射
+    expect(groupNames).toContain('🇹🇼 台湾');
+    expect(groupNames).toContain('🇭🇰 香港');
+    expect(groupNames).toContain('🇯🇵 日本');
+    expect(groupNames).toContain('🇺🇸 美国');
+    // 28 地区分组 + 4 件套（PROXY/Auto/Fallback/手动选择）+ 自研节点分组（如有）
+    // 这里 hostname 不进地区桶，但 self-research 节点可能挂进来；故断言"至少 32"
+    expect(groupNames.length).toBeGreaterThanOrEqual(32);
+    // 4 件套 + 28 地区 必须齐全
+    for (const required of ['PROXY', 'Auto', 'Fallback', '手动选择']) {
+      expect(groupNames).toContain(required);
+    }
     // host_node 仍进 4 件套
     const auto = parsed['proxy-groups'].find((g: any) => g.name === 'Auto');
     expect(auto.proxies).toContain('host_node');
+    // 空 country 组用 select 类型（url-test 空 proxies 必崩）
+    const tw = parsed['proxy-groups'].find((g: any) => g.name === '🇹🇼 台湾');
+    expect(tw.type).toBe('select');
+    expect(tw.proxies).toEqual([]);
   });
 
   it('geoip mock not invoked: cfp self-named nodes still get cidr-bucketed (cidr.ts fallback path)', async () => {

@@ -6,6 +6,43 @@ import * as yaml from 'js-yaml';
 import type { ClashConfig, ProxyDef, ProxyGroup } from './types';
 import { regionGroupName } from './geoip';
 
+// 全部 28 个地区分组（7 PRIMARY + 21 SECONDARY），必须全部出现在 proxy-groups
+// 即便没节点也要占位（用户用例："分组里面可以没有东西 但不能没有这个分组"）
+// 顺序：高频使用场景优先（巴哈 TW / Gemini HK / Play JP / 兜底 US）
+export const ALL_REGION_GROUPS: ReadonlyArray<string> = [
+  // PRIMARY（用户主场景）
+  '🇹🇼 台湾',
+  '🇭🇰 香港',
+  '🇯🇵 日本',
+  '🇺🇸 美国',
+  '🇨🇳 中国大陆',
+  '🇰🇷 韩国',
+  '🇸🇬 新加坡',
+  // SECONDARY（流量较大但非主要场景）
+  '🇬🇧 英国',
+  '🇩🇪 德国',
+  '🇫🇷 法国',
+  '🇦🇺 澳大利亚',
+  '🇨🇦 加拿大',
+  '🇮🇳 印度',
+  '🇹🇭 泰国',
+  '🇻🇳 越南',
+  '🇲🇾 马来西亚',
+  '🇵🇭 菲律宾',
+  '🇮🇩 印度尼西亚',
+  '🇧🇷 巴西',
+  '🇳🇱 荷兰',
+  '🇮🇹 意大利',
+  '🇪🇸 西班牙',
+  '🇸🇪 瑞典',
+  '🇳🇴 挪威',
+  '🇫🇮 芬兰',
+  '🇨🇭 瑞士',
+  '🇵🇱 波兰',
+  '🇷🇺 俄罗斯',
+  '🇹🇷 土耳其',
+];
+
 export function mergeYaml(yamls: string[], lookupCountry: (ip: string) => string | null = () => null): string {
   const merged: ClashConfig = {
     proxies: [],
@@ -68,6 +105,10 @@ export function bucketNodesByGeo(
 // + 按 IP 真实 country code 分桶的 url-test 地区分组（🇹🇼 台湾 / 🇭🇰 香港 / 🇯🇵 日本 / ...）
 // lookupCountry 由 caller 注入（merge.ts 不接 KV/env，单测易 mock）
 // 假 CN 节点（CF移动优选-CN-…）由 handler.stripFakeCountryNodes 在 merge 前剥
+//
+// 设计：28 个地区分组**永远发射**（即便空桶），用 type=select 兜底
+// 原因：url-test 空 proxies 必崩（Clash 客户端报错）；用户需要"分组占位"以便后续切换
+// 切换语义：把"🇯🇵 日本"分组拖到客户端某条规则的 proxy 里，如果当前没节点也只会显示"无节点"
 export function cfpStandardGroups(
   proxies: ProxyDef[],
   lookupCountry: (ip: string) => string | null,
@@ -76,19 +117,29 @@ export function cfpStandardGroups(
   if (allNames.length === 0) return [];
 
   const buckets = bucketNodesByGeo(proxies, lookupCountry);
+  // 按 ALL_REGION_GROUPS 顺序发射（高频场景在前），不在 ALL_REGION_GROUPS 内的桶不发射
   const regionGroups: ProxyGroup[] = [];
-  for (const [name, members] of buckets) {
-    if (name === FALLBACK_GROUP) continue; // 🌐其他 不发射（4 件套兜底已含全部）
-    if (members.length === 0) continue;
-    regionGroups.push({
-      name,
-      type: 'url-test',
-      url: 'http://www.gstatic.com/generate_204',
-      interval: 300,
-      tolerance: 50,
-      timeout: 3000,
-      proxies: members,
-    });
+  for (const name of ALL_REGION_GROUPS) {
+    const members = buckets.get(name) ?? [];
+    if (members.length > 0) {
+      // 有节点 → url-test 自动选最优
+      regionGroups.push({
+        name,
+        type: 'url-test',
+        url: 'http://www.gstatic.com/generate_204',
+        interval: 300,
+        tolerance: 50,
+        timeout: 3000,
+        proxies: members,
+      });
+    } else {
+      // 空桶 → select 占位（用户后续可手动选节点进此组）
+      regionGroups.push({
+        name,
+        type: 'select',
+        proxies: [],
+      });
+    }
   }
 
   // 4 件套在前，PROXY 永远是客户端最外层入口
