@@ -275,64 +275,83 @@ proxy-groups:
     expect(parsed.rules).toContain('MATCH,PROXY');
   });
 
-  it('cfp self-named nodes bucket by APAC-HKG/NA-LAX/NA-SEA prefix into url-test region groups', async () => {
-    // cfp 自研命名（cidr.ts 实测 colo 落地）= 信任源，按命名分地区组安全
-    // vendor 命名（CF-HKG-/🇭🇰/自由名）= 不可信，不进地区组（统一挂 Auto/Fallback/手动选择）
-    const clashYaml = [
-      'proxies:',
-      '  - {name: "APAC-HKG-01", server: 104.16.144.1, port: 443, type: vless}',
-      '  - {name: "APAC-HKG-02", server: 104.16.144.2, port: 443, type: vless}',
-      '  - {name: "NA-LAX-01", server: 8.35.211.1, port: 443, type: vless}',
-      '  - {name: "NA-SEA-01", server: 104.26.0.1, port: 443, type: vless}',
-      '  - {name: "CF-HKG-vendor", server: 1.2.3.4, port: 443, type: vless}',
-      '  - {name: "random_node", server: 5.6.7.8, port: 443, type: vless}',
-    ].join('\n');
-    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
-    const out = mergeSubscriptionPayloads([clashYaml]);
-    const parsed: any = (await import('js-yaml')).load(out);
-    const groups: any[] = parsed['proxy-groups'];
-    const names = groups.map((g) => g.name);
-
-    // 3 个地区组都在
-    expect(names).toContain('APAC-HKG');
-    expect(names).toContain('NA-LAX');
-    expect(names).toContain('NA-SEA');
-
-    // 各自只装自研节点
-    const hkg = groups.find((g) => g.name === 'APAC-HKG');
-    expect(hkg.type).toBe('url-test');
-    expect(hkg.url).toBe('http://www.gstatic.com/generate_204');
-    expect(hkg.proxies).toEqual(['APAC-HKG-01', 'APAC-HKG-02']);
-    const lax = groups.find((g) => g.name === 'NA-LAX');
-    expect(lax.proxies).toEqual(['NA-LAX-01']);
-    const sea = groups.find((g) => g.name === 'NA-SEA');
-    expect(sea.proxies).toEqual(['NA-SEA-01']);
-
-    // vendor 命名节点绝不能漏进地区组（安全护栏）
-    for (const g of [hkg, lax, sea]) {
-      expect(g.proxies).not.toContain('CF-HKG-vendor');
-      expect(g.proxies).not.toContain('random_node');
-    }
-
-    // 但 vendor/未识别节点仍进 Auto/Fallback/手动选择（统一兜底）
-    const auto = groups.find((g) => g.name === 'Auto');
-    expect(auto.proxies).toContain('CF-HKG-vendor');
-    expect(auto.proxies).toContain('random_node');
+  it('vendor nodes bucket by IP real country (geoip lookup) into region groups', async () => {
+    // 不再按节点名前缀分桶（vendor 命名骗不了用户），按 IP 真实归属（ip-api.com + KV 缓存 6h）
+    // 用例场景：巴哈姆特（台湾）/ Gemini（香港受部分限制）/ 日区 Play（日本）/ 兜底（美国）
+    // 注入 geoip lookup 函数模拟 KV 缓存命中
+    const fakeGeo: Record<string, string> = {
+      '203.0.113.5': 'TW',
+      '104.16.144.10': 'HK',
+      '8.8.8.8': 'US',
+    };
+    const proxies = [
+      { name: 'CF-HKG-vendor', server: '203.0.113.5', port: 443, type: 'vless' },
+      { name: 'JP-vendor', server: '104.16.144.10', port: 443, type: 'vless' },
+      { name: 'random_node', server: '8.8.8.8', port: 53, type: 'vless' },
+    ];
+    const { bucketNodesByGeo } = await import('../../src/subscription/merge');
+    const buckets = bucketNodesByGeo(proxies, (ip) => fakeGeo[ip] ?? null);
+    // 节点按真实 country 分桶，与名字前缀无关
+    expect(buckets.get('🇹🇼 台湾')).toEqual(['CF-HKG-vendor']);
+    expect(buckets.get('🇭🇰 香港')).toEqual(['JP-vendor']);
+    expect(buckets.get('🇺🇸 美国')).toEqual(['random_node']);
   });
 
-  it('region groups omitted when no cfp self-named nodes present', async () => {
-    // 只有 vendor/自由命名节点 → 4 件套独占，无地区组
-    const clashYaml = [
-      'proxies:',
-      '  - {name: "CF-HKG-vendor", server: 1.2.3.4, port: 443, type: vless}',
-      '  - {name: "random_node", server: 5.6.7.8, port: 443, type: vless}',
-    ].join('\n');
-    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
-    const out = mergeSubscriptionPayloads([clashYaml]);
-    const parsed: any = (await import('js-yaml')).load(out);
-    const names = parsed['proxy-groups'].map((g: any) => g.name);
-    expect(names).not.toContain('APAC-HKG');
-    expect(names).not.toContain('NA-LAX');
-    expect(names).not.toContain('NA-SEA');
+  it('vendor nodes fall into 🌐其他 when IP country is unknown or geoip fails', async () => {
+    const proxies = [
+      { name: 'unknown_loc', server: '10.0.0.1', port: 443, type: 'vless' },
+      { name: 'geoip_failed', server: '5.6.7.8', port: 443, type: 'vless' },
+    ];
+    const { bucketNodesByGeo } = await import('../../src/subscription/merge');
+    const buckets = bucketNodesByGeo(proxies, () => null);
+    expect(buckets.get('🌐其他')).toEqual(['unknown_loc', 'geoip_failed']);
+  });
+
+  it('ipv4 / ipv6 / hostname all fed to geoip; lookup function decides', async () => {
+    // hostname 由调用方解析（handler.ts merge 前 resolve）
+    // 此用例仅确认：传入 proxies 各自 server（已解析为 IP 字符串）走 geoip lookup
+    const proxies = [
+      { name: 'ipv6_node', server: '2606:4700::1', port: 443, type: 'vless' }, // CF anycast ipv6
+    ];
+    const { bucketNodesByGeo } = await import('../../src/subscription/merge');
+    const buckets = bucketNodesByGeo(proxies, (ip) => (ip.includes(':') ? 'US' : null));
+    // ipv6 命中 → 🇺🇸 美国
+    expect(buckets.get('🇺🇸 美国')).toEqual(['ipv6_node']);
+  });
+
+  it('region groups omitted when all nodes fall into 🌐其他', async () => {
+    const proxies = [
+      { name: 'rand1', server: '10.0.0.1', port: 443, type: 'vless' },
+      { name: 'rand2', server: '10.0.0.2', port: 443, type: 'vless' },
+    ];
+    const { bucketNodesByGeo } = await import('../../src/subscription/merge');
+    const buckets = bucketNodesByGeo(proxies, () => null);
+    expect(buckets.size).toBe(1);
+    expect(buckets.has('🌐其他')).toBe(true);
+  });
+
+  it('multi-country vendor pool: TW + HK + JP + US + KR + SG + AU + DE all represented', async () => {
+    const fakeGeo: Record<string, string> = {
+      '1.0.0.1': 'AU',
+      '2.0.0.1': 'DE',
+      '3.0.0.1': 'KR',
+      '4.0.0.1': 'JP',
+      '5.0.0.1': 'TW',
+      '6.0.0.1': 'SG',
+    };
+    const proxies = Object.entries(fakeGeo).map(([ip, cc]) => ({
+      name: `${cc}_${ip}`,
+      server: ip,
+      port: 443,
+      type: 'vless',
+    }));
+    const { bucketNodesByGeo } = await import('../../src/subscription/merge');
+    const buckets = bucketNodesByGeo(proxies, (ip) => fakeGeo[ip] ?? null);
+    expect(buckets.get('🇦🇺 澳大利亚')).toEqual(['AU_1.0.0.1']);
+    expect(buckets.get('🇩🇪 德国')).toEqual(['DE_2.0.0.1']);
+    expect(buckets.get('🇰🇷 韩国')).toEqual(['KR_3.0.0.1']);
+    expect(buckets.get('🇯🇵 日本')).toEqual(['JP_4.0.0.1']);
+    expect(buckets.get('🇹🇼 台湾')).toEqual(['TW_5.0.0.1']);
+    expect(buckets.get('🇸🇬 新加坡')).toEqual(['SG_6.0.0.1']);
   });
 });

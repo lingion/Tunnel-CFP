@@ -10,15 +10,6 @@ export type Region = 'APAC' | 'NA';
 export type Colo = 'HKG' | 'LAX' | 'SEA';
 export type Bucket = 'APAC-HKG' | 'NA-LAX' | 'NA-SEA';
 
-// 供 merge.ts 地区分组用：cfp 自研节点名前缀 → 地区
-// 前缀匹配规则：节点名必须以 `<Bucket>-` 开头（如 `APAC-HKG-01` 命中 APAC-HKG）
-// vendor 命名（CF-HKG-/🇭🇰xxx/自由名）一律不命中，下沉到 4 件套兜底
-export const SELF_NAMED_BUCKETS: Array<{ name: Bucket; prefix: string }> = [
-  { name: 'APAC-HKG', prefix: 'APAC-HKG-' },
-  { name: 'NA-LAX', prefix: 'NA-LAX-' },
-  { name: 'NA-SEA', prefix: 'NA-SEA-' },
-];
-
 export interface CidrEntry {
   cidr: string;
 }

@@ -4,11 +4,9 @@
 // 输入按形态自动识别：Clash YAML · base64(vless:// 列表) · 明文节点列表
 import * as yaml from 'js-yaml';
 import type { ClashConfig, ProxyDef, ProxyGroup } from './types';
-import type { Bucket } from './cidr';
-import { SELF_NAMED_BUCKETS } from './cidr';
-export { SELF_NAMED_BUCKETS };
+import { regionGroupName } from './geoip';
 
-export function mergeYaml(yamls: string[]): string {
+export function mergeYaml(yamls: string[], lookupCountry: (ip: string) => string | null = () => null): string {
   const merged: ClashConfig = {
     proxies: [],
     'proxy-groups': [],
@@ -30,8 +28,8 @@ export function mergeYaml(yamls: string[]): string {
     // rules 同样丢弃（vendor 带不带规则不归我们管），由 cfpRules() 固定两条兜底
   }
 
-  // cfp 标准分组：vendor 全丢，cfp 标准 4 件套接管（不分地区组）
-  merged['proxy-groups'] = cfpStandardGroups(merged.proxies as ProxyDef[]);
+  // cfp 标准分组：vendor 全丢，cfp 标准 4 件套接管 + 按 IP 真实 country code 分桶
+  merged['proxy-groups'] = cfpStandardGroups(merged.proxies as ProxyDef[], lookupCountry);
   merged.rules = cfpRules();
 
   return yaml.dump(merged, { lineWidth: -1, noRefs: true });
@@ -42,36 +40,46 @@ export function cfpRules(): string[] {
   return ['GEOIP,CN,DIRECT', 'MATCH,PROXY'];
 }
 
-// cfp 自研命名节点（cidr.ts 实测 colo 落地）→ 按 region bucket 拆组
-// vendor 命名（CF-HKG-/🇭🇰xxx/自由名）不命中，统一挂 4 件套兜底
-export function bucketSelfNamedNodes(names: string[]): Map<Bucket, string[]> {
-  const map = new Map<Bucket, string[]>();
-  for (const { name } of SELF_NAMED_BUCKETS) map.set(name, []);
-  for (const n of names) {
-    for (const { name, prefix } of SELF_NAMED_BUCKETS) {
-      if (n.startsWith(prefix)) {
-        map.get(name)!.push(n);
-        break;
-      }
-    }
+// 按 IP 真实 country code 分桶（vendor 节点 + 自研节点统一处理）
+// lookupCountry(ip) → country code 字符串 or null（geoip 失败/未知）
+// 返回 Map<groupName, name[]>：groupName 来自 geoip.regionGroupName()，
+// 未命中（如未知 CC / lookup 失败）落入 🌐其他
+// 🌐其他 永远存在但空桶时不发射到 proxy-groups（cfpStandardGroups 控制）
+const FALLBACK_GROUP = '🌐其他';
+
+export function bucketNodesByGeo(
+  proxies: ProxyDef[],
+  lookupCountry: (ip: string) => string | null,
+): Map<string, string[]> {
+  const buckets = new Map<string, string[]>();
+  for (const p of proxies) {
+    const ip = typeof p.server === 'string' ? p.server : '';
+    if (!p.name || !ip) continue; // 没名字/IP 不进任何桶
+    const cc = lookupCountry(ip);
+    const group = (cc ? regionGroupName(cc) : null) ?? FALLBACK_GROUP;
+    const arr = buckets.get(group);
+    if (arr) arr.push(p.name);
+    else buckets.set(group, [p.name]);
   }
-  return map;
+  return buckets;
 }
 
 // cfp 标准四件套分组（A1 = Clash-Butler 风格 PROXY / Auto / Fallback / 手动选择）
-// + 自研命名节点（APAC-HKG-/NA-LAX-/NA-SEA- 前缀）的地区 url-test 分组
-// vendor 命名节点不可信（名称骗不了用户），只挂 4 件套兜底
-// 假 CN 节点（CF移动优选-CN-…）由 handler.stripFakeCountryNodes 在 merge 后剥，
-// 本函数只看 proxies.name，不重复判定
-export function cfpStandardGroups(proxies: ProxyDef[]): ProxyGroup[] {
+// + 按 IP 真实 country code 分桶的 url-test 地区分组（🇹🇼 台湾 / 🇭🇰 香港 / 🇯🇵 日本 / ...）
+// lookupCountry 由 caller 注入（merge.ts 不接 KV/env，单测易 mock）
+// 假 CN 节点（CF移动优选-CN-…）由 handler.stripFakeCountryNodes 在 merge 前剥
+export function cfpStandardGroups(
+  proxies: ProxyDef[],
+  lookupCountry: (ip: string) => string | null,
+): ProxyGroup[] {
   const allNames = proxies.map((p) => p.name).filter(Boolean);
   if (allNames.length === 0) return [];
 
-  const buckets = bucketSelfNamedNodes(allNames);
+  const buckets = bucketNodesByGeo(proxies, lookupCountry);
   const regionGroups: ProxyGroup[] = [];
-  for (const { name } of SELF_NAMED_BUCKETS) {
-    const members = buckets.get(name) ?? [];
-    if (members.length === 0) continue; // 桶为空不发射，避免客户端一堆 0 节点组
+  for (const [name, members] of buckets) {
+    if (name === FALLBACK_GROUP) continue; // 🌐其他 不发射（4 件套兜底已含全部）
+    if (members.length === 0) continue;
     regionGroups.push({
       name,
       type: 'url-test',
@@ -118,8 +126,11 @@ export function cfpStandardGroups(proxies: ProxyDef[]): ProxyGroup[] {
 }
 
 // /sub/all 入口：先按载荷形态规范化（vless 列表 → Clash proxies），再走统一合并
-export function mergeSubscriptionPayloads(payloads: string[]): string {
-  return mergeYaml(payloads.map(normalizePayload));
+export function mergeSubscriptionPayloads(
+  payloads: string[],
+  lookupCountry: (ip: string) => string | null = () => null,
+): string {
+  return mergeYaml(payloads.map(normalizePayload), lookupCountry);
 }
 
 // 单个载荷规范化：base64 解码（若可行且解码后像节点列表）→ 保持/转成 Clash YAML 文本
