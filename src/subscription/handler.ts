@@ -69,14 +69,13 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
 // 把 vendor 输出里的"假国家"段过滤掉：
 //   CF移动优选-CN-... · CF联通优选-CN-... · CF电信优选-CN-... · CF官方优选-CN-...
 // vendor 把 request.cf.country + ASN 请求者的属性写到节点名上当"国家归属"——CF edge IP 是 anycast，
-// 不存在国家级归属，是误导信息。同时去掉对应的 Trojan 孪生（同名 + ·Trojan）
+// 不存在国家级归属，是误导信息。
 export const FAKE_COUNTRY_PREFIX_RE = /^CF(移动|联通|电信|官方)优选-/;
-const TROJAN_TWIN_SUFFIX = '·Trojan';
 
 export function stripFakeCountryNodes(yamlText: string): string {
   const lines = yamlText.split('\n');
   const out: string[] = [];
-  // 先扫一遍，拿到要剔除的 name（vless + 孪生 trojan）
+  // 先扫一遍，拿到要剔除的 name
   const dropNames = new Set<string>();
   for (const l of lines) {
     const m = l.match(/^\s*-\s*name:\s*"?([^"#]+?)"?\s*(?:#.*)?$/);
@@ -84,12 +83,6 @@ export function stripFakeCountryNodes(yamlText: string): string {
     const rawName = m[1]!;
     if (FAKE_COUNTRY_PREFIX_RE.test(rawName)) {
       dropNames.add(rawName);
-      // 孪生节点名是 `<原名>·Trojan`
-      if (rawName.endsWith(TROJAN_TWIN_SUFFIX)) {
-        dropNames.add(rawName.slice(0, -TROJAN_TWIN_SUFFIX.length));
-      } else {
-        dropNames.add(`${rawName}${TROJAN_TWIN_SUFFIX}`);
-      }
     }
   }
   // 逐行扫描：
@@ -120,7 +113,7 @@ export function stripFakeCountryNodes(yamlText: string): string {
 }
 
 // 治理后的 Clash YAML → base64 vless 列表（/sub/edgetunnel 形态，V2RayNG 订阅直接吃）
-// 只导出 vless 节点（Trojan 孪生是 Clash 侧冗余，vless 已含全部信息）
+// 只导出 vless 节点（cfp 协议族仅 vless）
 function clashToVlessLinks(yamlText: string): string {
   const parsed = (yaml.load(yamlText) as { proxies?: ProxyDef[] } | null) || {};
   const links: string[] = [];

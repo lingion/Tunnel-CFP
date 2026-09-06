@@ -1,11 +1,12 @@
 // src/subscription/merge.ts
-// 合并多个订阅载荷，保留 proxies / proxy-groups / rules
+// 合并多个订阅载荷，保留 proxies / rules
+// proxy-groups 一律丢弃，cfp 统一接管分组命名（cfpStandardGroups）
 // 输入按形态自动识别：Clash YAML · base64(vless:// 列表) · 明文节点列表
-// proxy-groups 同名时合并 proxies 列表去重
 import * as yaml from 'js-yaml';
 import type { ClashConfig, ProxyDef, ProxyGroup } from './types';
-import { sha224Hex } from './sha224';
-export { sha224Hex };
+import type { Bucket } from './cidr';
+import { SELF_NAMED_BUCKETS } from './cidr';
+export { SELF_NAMED_BUCKETS };
 
 export function mergeYaml(yamls: string[]): string {
   const merged: ClashConfig = {
@@ -24,32 +25,96 @@ export function mergeYaml(yamls: string[]): string {
       }
     }
 
-    if (parsed['proxy-groups']) {
-      for (const pg of parsed['proxy-groups']) {
-        const existing = merged['proxy-groups']!.find((g) => g.name === pg.name);
-        if (existing) {
-          const seen = new Set(existing.proxies);
-          for (const name of pg.proxies) {
-            if (!seen.has(name)) {
-              existing.proxies.push(name);
-              seen.add(name);
-            }
-          }
-        } else {
-          merged['proxy-groups']!.push({
-            ...(pg as ProxyGroup),
-            proxies: [...pg.proxies],
-          });
-        }
-      }
-    }
-
-    if (parsed.rules) {
-      merged.rules!.push(...parsed.rules);
-    }
+    // proxy-groups 故意不合并：vendor 自带分组命名五花八门（中文 / emoji / 英文），
+    // 全部丢弃，由 cfpStandardGroups 统一接管
+    // rules 同样丢弃（vendor 带不带规则不归我们管），由 cfpRules() 固定两条兜底
   }
 
+  // cfp 标准分组：vendor 全丢，cfp 标准 4 件套接管（不分地区组）
+  merged['proxy-groups'] = cfpStandardGroups(merged.proxies as ProxyDef[]);
+  merged.rules = cfpRules();
+
   return yaml.dump(merged, { lineWidth: -1, noRefs: true });
+}
+
+// cfp 标准分流规则（固定两条兜底，vendor 自带规则全部丢弃）
+export function cfpRules(): string[] {
+  return ['GEOIP,CN,DIRECT', 'MATCH,PROXY'];
+}
+
+// cfp 自研命名节点（cidr.ts 实测 colo 落地）→ 按 region bucket 拆组
+// vendor 命名（CF-HKG-/🇭🇰xxx/自由名）不命中，统一挂 4 件套兜底
+export function bucketSelfNamedNodes(names: string[]): Map<Bucket, string[]> {
+  const map = new Map<Bucket, string[]>();
+  for (const { name } of SELF_NAMED_BUCKETS) map.set(name, []);
+  for (const n of names) {
+    for (const { name, prefix } of SELF_NAMED_BUCKETS) {
+      if (n.startsWith(prefix)) {
+        map.get(name)!.push(n);
+        break;
+      }
+    }
+  }
+  return map;
+}
+
+// cfp 标准四件套分组（A1 = Clash-Butler 风格 PROXY / Auto / Fallback / 手动选择）
+// + 自研命名节点（APAC-HKG-/NA-LAX-/NA-SEA- 前缀）的地区 url-test 分组
+// vendor 命名节点不可信（名称骗不了用户），只挂 4 件套兜底
+// 假 CN 节点（CF移动优选-CN-…）由 handler.stripFakeCountryNodes 在 merge 后剥，
+// 本函数只看 proxies.name，不重复判定
+export function cfpStandardGroups(proxies: ProxyDef[]): ProxyGroup[] {
+  const allNames = proxies.map((p) => p.name).filter(Boolean);
+  if (allNames.length === 0) return [];
+
+  const buckets = bucketSelfNamedNodes(allNames);
+  const regionGroups: ProxyGroup[] = [];
+  for (const { name } of SELF_NAMED_BUCKETS) {
+    const members = buckets.get(name) ?? [];
+    if (members.length === 0) continue; // 桶为空不发射，避免客户端一堆 0 节点组
+    regionGroups.push({
+      name,
+      type: 'url-test',
+      url: 'http://www.gstatic.com/generate_204',
+      interval: 300,
+      tolerance: 50,
+      timeout: 3000,
+      proxies: members,
+    });
+  }
+
+  // 4 件套在前，PROXY 永远是客户端最外层入口
+  const stdGroups: ProxyGroup[] = [
+    {
+      name: 'PROXY',
+      type: 'select',
+      proxies: ['Auto', 'Fallback', 'DIRECT', '手动选择', ...allNames],
+    },
+    {
+      name: 'Auto',
+      type: 'url-test',
+      url: 'http://www.gstatic.com/generate_204',
+      interval: 300,
+      tolerance: 50,
+      timeout: 3000,
+      proxies: allNames,
+    },
+    {
+      name: 'Fallback',
+      type: 'fallback',
+      url: 'http://www.gstatic.com/generate_204',
+      interval: 300,
+      timeout: 3000,
+      proxies: allNames,
+    },
+    {
+      name: '手动选择',
+      type: 'select',
+      proxies: allNames,
+    },
+  ];
+
+  return [...stdGroups, ...regionGroups];
 }
 
 // /sub/all 入口：先按载荷形态规范化（vless 列表 → Clash proxies），再走统一合并
@@ -88,63 +153,26 @@ function normalizePayload(payload: string): string {
   return trimmed;
 }
 
-// share-link 行 → 最小 Clash config YAML（proxies + selector group + 基础规则）
-// vless 节点自动生成 Trojan 孪生节点（密码 sha224(该节点 uuid)）：vendor WS 入站按首包嗅探，
-// 同一条 WS 路径 vless/trojan 双协议并存，实测 e2e 通；被封一个切另一个
+// share-link 行 → 最小 Clash config YAML（仅 proxies）
+// proxy-groups / rules 由 mergeYaml 的 cfpStandardGroups / cfpRules 统一接管
+// 当前仅解析 vless://（cfp 自家协议），其他 scheme 在 normalizePayload 形态识别处被吞掉
 function shareLinksToClashYaml(links: string[]): string {
   const proxies: ProxyDef[] = [];
   for (const link of links) {
     const p = parseShareLink(link);
     if (!p) continue;
     proxies.push(p);
-    if (p.type === 'vless' && typeof p.uuid === 'string') {
-      const twin = buildTrojanTwin(p);
-      if (twin) proxies.push(twin);
-    }
   }
-  const config: ClashConfig = {
-    proxies,
-    'proxy-groups': [
-      {
-        name: 'PROXY',
-        type: 'select',
-        proxies: proxies.map((p) => p.name),
-      },
-    ],
-    rules: ['GEOIP,CN,DIRECT', 'MATCH,PROXY'],
-  };
-  return yaml.dump(config, { lineWidth: -1, noRefs: true });
+  return yaml.dump({ proxies }, { lineWidth: -1, noRefs: true });
 }
 
-// vless Clash 节点 → trojan 孪生（同 server/port/ws/tls，password=sha224(uuid)）
-function buildTrojanTwin(v: ProxyDef): ProxyDef | null {
-  const uuid = v.uuid;
-  if (typeof uuid !== 'string' || !uuid) return null;
-  const twin: ProxyDef = {
-    name: `${v.name}·Trojan`,
-    type: 'trojan',
-    server: v.server,
-    port: v.port,
-    password: sha224Hex(uuid),
-    udp: v.udp === true,
-    tls: true, // trojan 语义上强制 TLS；无 TLS 的明文节点不出孪生
-    network: v.network || 'tcp',
-  };
-  if (v.network === 'ws' && v['ws-opts'] && typeof v['ws-opts'] === 'object') {
-    twin['ws-opts'] = JSON.parse(JSON.stringify(v['ws-opts']));
-  }
-  if (typeof v.sni === 'string' && v.sni) twin.sni = v.sni;
-  else if (typeof v['server-name'] === 'string' && v['server-name']) twin.sni = v['server-name'];
-  if (v['skip-cert-verify'] === true) twin['skip-cert-verify'] = true;
-  return twin;
-}
-
-// vless://uuid@host:port?params#name / trojan://password@host:port?params#name → Clash ProxyDef
+// vless://uuid@host:port?params#name → Clash ProxyDef
+// 其他 scheme（vmess/trojan/ss/hysteria2）按需扩展；当前 normalizePayload 也只接 vless:// 列表
 export function parseShareLink(link: string): ProxyDef | null {
   const m = link.match(/^(vless|vmess|trojan|ss|hysteria2?):\/\//);
   if (!m) return null;
   const scheme = m[1];
-  if (scheme !== 'vless' && scheme !== 'trojan') return null; // vmess(base64主体)/ss/hy2 按需扩展
+  if (scheme !== 'vless') return null; // 仅 vless；其他 scheme 暂不解析
   try {
     const hashIdx = link.indexOf('#');
     const name = hashIdx >= 0 ? decodeURIComponent(link.slice(hashIdx + 1)) : `node-${Math.abs(hash(link)) % 10000}`;
@@ -170,14 +198,10 @@ export function parseShareLink(link: string): ProxyDef | null {
       server,
       port,
       udp: query.get('udp') === 'true',
-      tls: scheme === 'trojan' || security === 'tls' || security === 'reality',
+      tls: security === 'tls' || security === 'reality',
       network,
     };
-    if (scheme === 'vless') {
-      def.uuid = uuid;
-    } else {
-      def.password = query.get('password') ?? uuid; // trojan 密码在 userinfo 位
-    }
+    def.uuid = uuid;
     if (security === 'reality') {
       def['reality-opts'] = {
         'public-key': query.get('pbk') || '',

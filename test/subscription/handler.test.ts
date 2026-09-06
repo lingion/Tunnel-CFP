@@ -62,13 +62,19 @@ describe('handleSubscription integration', () => {
     expect(text).not.toContain('et1');
   });
 
-  it('/sub/all merges both vendors with deduplicated AUTO proxies', async () => {
+  it('/sub/all merges both vendors with cfp standard groups (vendor AUTO dropped, Auto emitted)', async () => {
     const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('et1');
     expect(text).toContain('yk1');
-    expect(text).toContain('AUTO');
+    // vendor 自带的 AUTO（url-test，引用 yk1）被丢弃
+    expect(text).not.toMatch(/^\s*-?\s*name:\s*AUTO\s*$/m);
+    // cfp 标准分组接管入口
+    expect(text).toContain('PROXY');
+    expect(text).toContain('Auto'); // cfp 标准 url-test group
+    expect(text).toContain('Fallback');
+    expect(text).toContain('手动选择');
   });
 
   it('/sub/unknown returns 404', async () => {
@@ -156,10 +162,6 @@ proxies:
     server: 104.19.151.76
     port: 2083
     type: vless
-  - name: "CF移动优选-CN-1325251·Trojan"
-    server: 104.19.151.76
-    port: 2083
-    type: trojan
   - name: "CF_V1_www.visa.com_80"
     server: www.visa.com
     port: 80
