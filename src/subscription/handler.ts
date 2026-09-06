@@ -8,6 +8,7 @@ import { mergeSubscriptionPayloads } from './merge';
 import { getGeoNamedNodes } from './geo';
 import { type OptimizedNode } from './cidr';
 import { md5md5 } from './md5';
+import { lookupCountriesCached } from './geoip';
 import type { ProxyDef } from './types';
 
 export async function handleSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -44,7 +45,9 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
       // V2RayNG 链接：vendor base64 列表先走同一套治理（merge 规范化 → 剥假 CN），
       // 再反向导出 base64 vless 列表（保持客户端形态），追加实测落地 colo 命名自研节点
       const geoNodes = await getGeoNamedNodes(env, ctx, url.host);
-      const merged = mergeSubscriptionPayloads([etText, optimizedNodesToYaml(geoNodes)]);
+      const optimizedYaml = optimizedNodesToYaml(geoNodes);
+      const lookupCountry = await makeLookupCountry([etText, optimizedYaml], env, ctx);
+      const merged = mergeSubscriptionPayloads([etText, optimizedYaml], lookupCountry);
       const cleaned = stripFakeCountryNodes(merged);
       const links = clashToVlessLinks(cleaned);
       return new Response(btoa(links), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -55,7 +58,8 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
       // 必须等 mergeSubscriptionPayloads 规范化成 Clash YAML 后才能按 name 过滤）
       const geoNodes = await getGeoNamedNodes(env, ctx, url.host);
       const optimizedYaml = optimizedNodesToYaml(geoNodes);
-      const merged = mergeSubscriptionPayloads([etText, ykText, optimizedYaml]);
+      const lookupCountry = await makeLookupCountry([etText, ykText, optimizedYaml], env, ctx);
+      const merged = mergeSubscriptionPayloads([etText, ykText, optimizedYaml], lookupCountry);
       const cleaned = stripFakeCountryNodes(merged);
       return new Response(cleaned, { headers: yamlHeaders });
     }
@@ -144,6 +148,45 @@ function clashToVlessLinks(yamlText: string): string {
     links.push(`vless://${uuid}@${server}:${port}?${params.toString()}#${encodeURIComponent(p.name)}`);
   }
   return links.join('\n');
+}
+
+// 把 vendor 输出规范化一次，提取所有 IPv4/IPv6 server 字符串
+// 仅查 IP 形态的 server；hostname（example.com）下沉到 🌐其他（避免每次触发 DNS 查询）
+const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const IPV6_RE = /^[0-9a-fA-F:]+$/;
+
+function collectIpsFromYamlTexts(texts: string[]): string[] {
+  const ips = new Set<string>();
+  for (const t of texts) {
+    if (!t || !t.trim()) continue;
+    let parsed: any;
+    try {
+      parsed = yaml.load(t);
+    } catch {
+      continue;
+    }
+    const proxies = parsed?.proxies;
+    if (!Array.isArray(proxies)) continue;
+    for (const p of proxies) {
+      const s = typeof p?.server === 'string' ? p.server : '';
+      if (!s) continue;
+      if (IPV4_RE.test(s) || (s.includes(':') && IPV6_RE.test(s))) ips.add(s);
+    }
+  }
+  return [...ips];
+}
+
+// 从多份 yaml 文本提取 IP → KV 缓存 + ip-api batch → 返回 (ip) => cc 闭包
+// hostname 节点、geoip 失败、cache miss 一律返回 null（落到 🌐其他 兜底）
+async function makeLookupCountry(
+  yamlTexts: string[],
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<(ip: string) => string | null> {
+  const ips = collectIpsFromYamlTexts(yamlTexts);
+  if (ips.length === 0) return () => null;
+  const map = await lookupCountriesCached(ips, env, ctx);
+  return (ip) => map.get(ip) ?? null;
 }
 
 // 自研 CF-{REGION}-{N} 节点 → 形如 vendor /sub mixed 输出的 vless:// 行（便于走 mergeSubscriptionPayloads）

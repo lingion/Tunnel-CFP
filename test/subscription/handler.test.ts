@@ -259,3 +259,131 @@ describe('/sub/edgetunnel geo treatment (V2RayNG base64 output)', () => {
     expect(names.some((n) => /^(APAC-HKG|NA-LAX|NA-SEA)-\d+$/.test(n))).toBe(true);
   });
 });
+
+// geoip 集成：mock lookupCountriesCached 返回已知 country，
+// 验证 /sub/all 输出含按 IP 真实 country 的地区分组（🇹🇼 台湾 / 🇭🇰 香港 / 🇯🇵 日本）
+describe('/sub/all buckets vendor nodes by IP real country (geoip integration)', () => {
+  const setupWithGeo = (geoByIp: Record<string, string | null>) => {
+    vi.resetModules();
+    // vendor 返回混合 IP 节点（覆盖 TW/HK/JP/US + 🌐其他）
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response(`
+proxies:
+  - name: "bah_node"
+    server: 203.0.113.5
+    port: 443
+    type: vless
+  - name: "gemini_node"
+    server: 104.16.144.10
+    port: 443
+    type: vless
+  - name: "play_jp"
+    server: 1.0.0.1
+    port: 443
+    type: vless
+  - name: "us_fallback"
+    server: 8.8.8.8
+    port: 53
+    type: vless
+  - name: "unknown_loc"
+    server: 10.0.0.1
+    port: 443
+    type: vless
+`, { status: 200 })) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response('proxies: []', { status: 200 })) },
+    }));
+    // mock lookupCountriesCached 直接返回固定字典（KV+ip-api 命中）
+    vi.doMock('../../src/subscription/geoip', async (orig) => {
+      const mod = await orig<typeof import('../../src/subscription/geoip')>();
+      return {
+        ...mod,
+        lookupCountriesCached: async () => new Map(Object.entries(geoByIp)),
+        lookupCountryCached: async (ip: string) => geoByIp[ip] ?? null,
+      };
+    });
+  };
+
+  it('emits 🇹🇼 台湾 / 🇭🇰 香港 / 🇯🇵 日本 / 🇺🇸 美国 groups from geoip lookup', async () => {
+    setupWithGeo({
+      '203.0.113.5': 'TW',
+      '104.16.144.10': 'HK',
+      '1.0.0.1': 'JP',
+      '8.8.8.8': 'US',
+      '10.0.0.1': null, // geoip 失败 → 🌐其他 兜底
+    });
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID, KV: undefined } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx2);
+    const text = await res.text();
+    const parsed: any = (await import('js-yaml')).load(text);
+    const groupNames = parsed['proxy-groups'].map((g: any) => g.name);
+
+    // 4 个 country 组都在
+    expect(groupNames).toContain('🇹🇼 台湾');
+    expect(groupNames).toContain('🇭🇰 香港');
+    expect(groupNames).toContain('🇯🇵 日本');
+    expect(groupNames).toContain('🇺🇸 美国');
+    // 🌐其他 不发射（4 件套兜底含全部）
+    expect(groupNames).not.toContain('🌐其他');
+
+    // 各自只装对应 country 的节点
+    const tw = parsed['proxy-groups'].find((g: any) => g.name === '🇹🇼 台湾');
+    expect(tw.proxies).toContain('bah_node');
+    expect(tw.type).toBe('url-test');
+    const hk = parsed['proxy-groups'].find((g: any) => g.name === '🇭🇰 香港');
+    expect(hk.proxies).toContain('gemini_node');
+    const jp = parsed['proxy-groups'].find((g: any) => g.name === '🇯🇵 日本');
+    expect(jp.proxies).toContain('play_jp');
+    const us = parsed['proxy-groups'].find((g: any) => g.name === '🇺🇸 美国');
+    expect(us.proxies).toContain('us_fallback');
+
+    // 安全护栏：节点名跟 country 一致（如 `bah_node` 不漏进 🇯🇵 日本）
+    for (const grp of [tw, hk, jp, us]) {
+      expect(grp.proxies).not.toContain('unknown_loc');
+    }
+  });
+
+  it('hostnames (non-IP server) are not geoip-queried; fall to 🌐其他 via bucketNodesByGeo', async () => {
+    setupWithGeo({}); // 空 geo = 全部 unknown
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async () => new Response(`
+proxies:
+  - name: "host_node"
+    server: example.com
+    port: 443
+    type: vless
+`, { status: 200 })) },
+    }));
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID, KV: undefined } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx2);
+    const text = await res.text();
+    const parsed: any = (await import('js-yaml')).load(text);
+    const groupNames = parsed['proxy-groups'].map((g: any) => g.name);
+    // hostname 不发 geoip → 无 country 组
+    expect(groupNames).not.toContain('🇹🇼 台湾');
+    expect(groupNames).not.toContain('🇭🇰 香港');
+    // host_node 仍进 4 件套
+    const auto = parsed['proxy-groups'].find((g: any) => g.name === 'Auto');
+    expect(auto.proxies).toContain('host_node');
+  });
+
+  it('geoip mock not invoked: cfp self-named nodes still get cidr-bucketed (cidr.ts fallback path)', async () => {
+    // 自研节点（APAC-HKG-*）用 cidr.ts 命名挂入，不依赖 geoip
+    // 这个测试保留 cidr.ts 路径的功能不变
+    setupWithGeo({});
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID, KV: undefined } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const res = await handleSubscription(new Request(`https://x.test/sub/all?token=${await tokenFor('x.test')}`), env, ctx2);
+    const text = await res.text();
+    const parsed: any = (await import('js-yaml')).load(text);
+    const names = parsed.proxies.map((p: any) => p.name);
+    // 自研节点（cidr.ts）依然存在
+    expect(names.some((n: string) => /^(APAC-HKG|NA-LAX|NA-SEA)-\d+$/.test(n))).toBe(true);
+  });
+});
