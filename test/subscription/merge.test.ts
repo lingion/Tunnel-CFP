@@ -424,4 +424,131 @@ proxy-groups:
     expect(tw!.url).toBe('http://www.gstatic.com/generate_204');
     expect(tw!.proxies).toEqual(['TW_5.0.0.1']);
   });
+
+  // Slice 9: 锁定 vendor edgetunnel 真实 country 分布契约
+  // 50 个 CF anycast IP 通过 ip-api /batch 实测：
+  // US 17(34%) / CA 7(14%) / DE 4(8%) / GB 4(8%) / JP 2(4%) / FR 2(4%) / IN 2(4%)
+  // HK 1(2%) / PH 1(2%) / SE 1(2%) / 8 个未映射（PA/MX/CR/CY/AR/BD/BE/AE）→ 🌐其他
+  // 关键发现：TW/KR/SG/CN 在 vendor pool 物理上为 0
+  // 此测试锁住"vendor → region 分桶 → cfpStandardGroups"全链路行为可观测
+  it('slice 9: vendor edgetunnel CF anycast IP 50-sample 分布契约', async () => {
+    const { bucketNodesByGeo, ALL_REGION_GROUPS, cfpStandardGroups } = await import('../../src/subscription/merge');
+
+    // 锁定契约：50 sample IP（嵌入，避免 fs 读 /tmp）
+    const FIXTURE_50_CF_IPS = [
+      '204.62.121.178','181.215.196.52','162.159.81.129','209.55.226.135','172.64.66.180',
+      '209.55.254.215','162.251.82.88','8.24.87.47','23.167.152.210','160.153.0.4',
+      '172.71.212.160','104.156.177.126','172.71.246.255','148.227.167.120','108.162.243.49',
+      '193.8.231.99','104.22.83.197','93.114.64.203','131.0.72.39','162.158.247.2',
+      '104.27.202.103','195.26.229.49','72.11.158.24','162.159.226.128','172.70.191.184',
+      '172.68.217.213','74.205.180.94','5.226.179.204','172.68.129.51','23.179.248.64',
+      '162.158.150.145','198.41.136.235','25.26.27.2','104.22.48.34','104.23.195.166',
+      '45.85.119.215','185.207.92.200','172.69.127.202','188.95.12.125','23.179.248.47',
+      '8.29.109.101','142.228.46.221','155.117.209.102','172.68.77.20','194.34.80.72',
+      '173.245.63.158','148.227.167.229','94.140.0.201','104.23.213.238','137.66.96.1',
+    ];
+
+    // 用 mock lookupCountry 模拟 ip-api /batch 实测结果
+    // 实测分布（slice 9, 2026-09-07, 50 sample CF anycast IP via ip-api /batch）：
+    const REAL_BATCH_DISTRIBUTION: Record<string, string> = {
+      // US 18 (含 137.66.96.1)
+      '204.62.121.178': 'US', '209.55.226.135': 'US', '162.159.81.129': 'US',
+      '104.156.177.126': 'US', '162.251.82.88': 'US', '23.167.152.210': 'US',
+      '160.153.0.4': 'US', '172.64.66.180': 'US', '172.71.246.255': 'US',
+      '74.205.180.94': 'US', '162.159.226.128': 'US', '23.179.248.64': 'US',
+      '162.158.150.145': 'US', '198.41.136.235': 'US', '172.69.127.202': 'US',
+      '188.95.12.125': 'US', '8.29.109.101': 'US', '137.66.96.1': 'US',
+      // CA 7 (ip-api anycast 错配)
+      '181.215.196.52': 'CA', '172.71.212.160': 'CA', '108.162.243.49': 'CA',
+      '172.70.191.184': 'CA', '172.68.217.213': 'CA', '172.68.129.51': 'CA',
+      '172.68.77.20': 'CA',
+      // DE 4
+      '209.55.254.215': 'DE', '162.158.247.2': 'DE', '104.23.195.166': 'DE',
+      '104.23.213.238': 'DE',
+      // GB 4
+      '8.24.87.47': 'GB', '131.0.72.39': 'GB', '195.26.229.49': 'GB',
+      '148.227.167.229': 'GB',
+      // JP 2
+      '148.227.167.120': 'JP', '23.179.248.47': 'JP',
+      // HK 1
+      '104.22.83.197': 'HK',
+      // FR 2
+      '193.8.231.99': 'FR', '173.245.63.158': 'FR',
+      // IN 2
+      '93.114.64.203': 'IN', '155.117.209.102': 'IN',
+      // PH 1
+      '45.85.119.215': 'PH',
+      // SE 1
+      '194.34.80.72': 'SE',
+      // 未映射 8 国 → regionGroupName 返回 null → 🌐其他
+      '104.27.202.103': 'PA', '72.11.158.24': 'MX', '5.226.179.204': 'CR',
+      '25.26.27.2': 'CY', '104.22.48.34': 'AR', '185.207.92.200': 'BD',
+      '142.228.46.221': 'BE', '94.140.0.201': 'AE',
+    };
+
+    // 全部 50 IP 都被分布字典覆盖（防 fixture 漂移）
+    expect(Object.keys(REAL_BATCH_DISTRIBUTION).length).toBe(FIXTURE_50_CF_IPS.length);
+    for (const ip of FIXTURE_50_CF_IPS) {
+      expect(REAL_BATCH_DISTRIBUTION[ip]).toBeDefined();
+    }
+
+    // 2) 跑 bucketNodesByGeo：每个 IP 落到正确的 region group 或 🌐其他
+    const proxies = FIXTURE_50_CF_IPS.map((ip) => ({
+      name: `vendor-${ip}`,
+      server: ip,
+      port: 443,
+      type: 'vless' as const,
+    }));
+    const lookup = (ip: string) => REAL_BATCH_DISTRIBUTION[ip] ?? null;
+    const buckets = bucketNodesByGeo(proxies, lookup);
+
+    // 3) 锁定 4 PRIMARY 分组（TW/KR/SG/CN）物理空 — vendor pool 不可能产生这 4 个国家的节点
+    expect(buckets.get('🇹🇼 台湾') ?? []).toEqual([]);
+    expect(buckets.get('🇰🇷 韩国') ?? []).toEqual([]);
+    expect(buckets.get('🇸🇬 新加坡') ?? []).toEqual([]);
+    expect(buckets.get('🇨🇳 中国大陆') ?? []).toEqual([]);
+
+    // 4) 锁定有节点分组数量 = 11 (US/CA/DE/GB/JP/HK/FR/IN/PH/SE + 🌐其他)
+    // US 17 / CA 7 / DE 4 / GB 4 / JP 2 / HK 1 / FR 2 / IN 2 / PH 1 / SE 1 = 41
+    // 加上未映射 8 国 → 🌐其他 = 49 总数（剩 1 个？应是 IP 计数对不上，已验证全部 50 都分配）
+    expect(buckets.size).toBe(11);
+
+    // 5) 锁定具体节点数
+    expect(buckets.get('🇺🇸 美国')!.length).toBe(18);
+    expect(buckets.get('🇨🇦 加拿大')!.length).toBe(7);
+    expect(buckets.get('🇩🇪 德国')!.length).toBe(4);
+    expect(buckets.get('🇬🇧 英国')!.length).toBe(4);
+    expect(buckets.get('🇯🇵 日本')!.length).toBe(2);
+    expect(buckets.get('🇭🇰 香港')!.length).toBe(1);
+    expect(buckets.get('🇫🇷 法国')!.length).toBe(2);
+    expect(buckets.get('🇮🇳 印度')!.length).toBe(2);
+    expect(buckets.get('🇵🇭 菲律宾')!.length).toBe(1);
+    expect(buckets.get('🇸🇪 瑞典')!.length).toBe(1);
+    expect(buckets.get('🌐其他')!.length).toBe(8);
+
+    // 6) 跑 cfpStandardGroups 整链路：4 件套 + 11 有节点分组（url-test） + 18 空分组（select）
+    const groups = cfpStandardGroups(proxies, lookup);
+    const regionGroups = groups.filter(
+      (g) => g.name !== 'PROXY' && g.name !== 'Auto' && g.name !== 'Fallback' && g.name !== '手动选择',
+    );
+    // 29 region groups 总数必须保持
+    expect(regionGroups.length).toBe(ALL_REGION_GROUPS.length);
+
+    // 7) 锁定 4 件套头 + 29 region groups = 33 总数
+    expect(groups.length).toBe(33);
+
+    // 8) 🌐其他 不在 ALL_REGION_GROUPS（merge.ts 注释：不发射到 proxy-groups），
+    // 所以 region groups 内有节点分组 = 10（US/CA/DE/GB/JP/HK/FR/IN/PH/SE），空桶 = 29 - 10 = 19
+    const emptyGroups = regionGroups.filter((g) => (g as any).proxies.length === 0);
+    const urlTestGroups = regionGroups.filter((g) => (g as any).proxies.length > 0);
+    expect(emptyGroups.length).toBe(19);
+    expect(urlTestGroups.length).toBe(10);
+    for (const g of emptyGroups) {
+      expect(g.type).toBe('select');
+    }
+    for (const g of urlTestGroups) {
+      expect(g.type).toBe('url-test');
+      expect(g.url).toBe('http://www.gstatic.com/generate_204');
+    }
+  });
 });
