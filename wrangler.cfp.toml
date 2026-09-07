@@ -1,0 +1,38 @@
+name = "cfp"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 自定义域名:换成你自己的域名(可选,不配则用 workers.dev 域)
+routes = [
+  # { pattern = "your-domain.example.com", custom_domain = true }  # 可选:自定义域名
+]
+
+# cfp Worker — v3 新部署目标
+# 与本账户其他 Worker 共用 CF account
+
+# KV:独立 KV namespace(部署时用 `npx wrangler kv namespace create KV` 创建,把 id 填进来)
+# vendor edgetunnel 硬编码 env.KV，所以 binding 必须叫 "KV"
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# UUID 节点认证：v3 生成新 UUID（与原 worker 不共享，避免节点混淆）
+UUID = "00000000-0000-4000-8000-000000000000" # ← 换成你自己的 UUIDv4
+# /proxy 与 /proxy-ws 用量闸:取消注释即启用(请求须带 ?key=值 或 Cookie: __proxy_key=值)
+# PROXY_KEY = "换成随机长随机串"
+
+[observability]
+enabled = true
+# 高流量被动代理:全量采样=每请求一条计费日志,非调试期降到 10%
+head_sampling_rate = 0.1
+
+# 部署命令:
+#   export CLOUDFLARE_API_TOKEN=$(cat ~/.cloudflare-token)
+#   cd ~/proxy && npx wrangler deploy -c wrangler.cfp.toml
+
+# Secrets 设置（v3 首次部署后跑）:
+#   npx wrangler secret put ADMIN -c wrangler.cfp.toml
+#   npx wrangler secret put KEY -c wrangler.cfp.toml  (vendor edgetunnel 用)
+#   npx wrangler secret put AGENT_KEY -c wrangler.cfp.toml  (Agent API 用)
