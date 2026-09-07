@@ -133,11 +133,12 @@ export function cfpStandardGroups(
         proxies: members,
       });
     } else {
-      // 空桶 → select 占位（用户后续可手动选节点进此组）
+      // 空桶 → select 占位；DIRECT 让 Clash Verge 接受非空候选列表。
+      // 这仍保留地区组入口，后续可在客户端切换到实际节点。
       regionGroups.push({
         name,
         type: 'select',
-        proxies: [],
+        proxies: ['DIRECT'],
       });
     }
   }

@@ -419,7 +419,7 @@ proxies:
     // 空 country 组用 select 类型（url-test 空 proxies 必崩）
     const tw = parsed['proxy-groups'].find((g: any) => g.name === '🇹🇼 台湾');
     expect(tw.type).toBe('select');
-    expect(tw.proxies).toEqual([]);
+    expect(tw.proxies).toEqual(['DIRECT']);
   });
 
   it('geoip mock not invoked: cfp self-named nodes still get cidr-bucketed (cidr.ts fallback path)', async () => {
