@@ -402,11 +402,27 @@ proxy-groups:
     // 没日本节点 → 🇯🇵 日本 必须是 select（不是 url-test）
     const jp = parsed['proxy-groups'].find((g: any) => g.name === '🇯🇵 日本');
     expect(jp.type).toBe('select');
-    expect(jp.proxies).toEqual([]); // 空桶不挂节点
+    expect(jp.proxies).toEqual(['DIRECT']); // 空桶用合法占位候选
     // 没美国节点 → 🇺🇸 美国 也是 select
     const us = parsed['proxy-groups'].find((g: any) => g.name === '🇺🇸 美国');
     expect(us.type).toBe('select');
-    expect(us.proxies).toEqual([]);
+    expect(us.proxies).toEqual(['DIRECT']);
+  });
+
+  it('gives empty region groups a valid Clash Verge candidate', async () => {
+    const { mergeSubscriptionPayloads } = await import('../../src/subscription/merge');
+    const out = mergeSubscriptionPayloads([b64('vless://u@a:443?encryption=none#lonely_node')]);
+    const parsed: any = (await import('js-yaml')).load(out);
+    const emptyGroups = parsed['proxy-groups'].filter(
+      (g: any) => g.name.startsWith('🇨🇳') || g.name.startsWith('🇯🇵'),
+    );
+
+    expect(emptyGroups.length).toBe(2);
+    for (const group of emptyGroups) {
+      expect(group.type).toBe('select');
+      expect(group.proxies).toEqual(['DIRECT']);
+      expect(group.proxies.length).toBeGreaterThan(0);
+    }
   });
 
   it('有节点的分组用 url-test 类型 + gstatic 健康检查', async () => {
@@ -539,8 +555,10 @@ proxy-groups:
 
     // 8) 🌐其他 不在 ALL_REGION_GROUPS（merge.ts 注释：不发射到 proxy-groups），
     // 所以 region groups 内有节点分组 = 10（US/CA/DE/GB/JP/HK/FR/IN/PH/SE），空桶 = 29 - 10 = 19
-    const emptyGroups = regionGroups.filter((g) => (g as any).proxies.length === 0);
-    const urlTestGroups = regionGroups.filter((g) => (g as any).proxies.length > 0);
+    const emptyGroups = regionGroups.filter(
+      (g) => (g as any).proxies.length === 1 && (g as any).proxies[0] === 'DIRECT',
+    );
+    const urlTestGroups = regionGroups.filter((g) => (g as any).proxies[0] !== 'DIRECT');
     expect(emptyGroups.length).toBe(19);
     expect(urlTestGroups.length).toBe(10);
     for (const g of emptyGroups) {
