@@ -2,6 +2,7 @@
 // 集成测试：mock 两个 vendor 的 fetch，验证 handleSubscription 输出
 import { describe, it, expect, vi } from 'vitest';
 
+
 const etYaml = `
 proxies:
   - name: "et1"
@@ -95,6 +96,41 @@ describe('handleSubscription integration', () => {
     expect(res.status).toBe(500);
   });
 });
+
+describe('subscription request normalization', () => {
+  it('uses hostname-only auth and HTTPS vendor requests when the incoming URL has a port', async () => {
+    vi.resetModules();
+    const seen: { edgetunnel?: URL; yonggekkk?: URL } = {};
+    vi.doMock('../../vendor/edgetunnel/_worker.js', () => ({
+      default: { fetch: vi.fn(async (req: Request) => {
+        seen.edgetunnel = new URL(req.url);
+        return new Response('proxies: []', { status: 200 });
+      }) },
+    }));
+    vi.doMock('../../vendor/yonggekkk/_worker.js', () => ({
+      default: { fetch: vi.fn(async (req: Request) => {
+        seen.yonggekkk = new URL(req.url);
+        return new Response('proxies: []', { status: 200 });
+      }) },
+    }));
+
+    const { handleSubscription } = await import('../../src/subscription/handler');
+    const env = { UUID: TEST_UUID } as unknown as Env;
+    const ctx2 = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const token = await md5md5('x.test' + TEST_UUID);
+    const res = await handleSubscription(
+      new Request(`https://x.test:8787/sub/all?token=${token}`),
+      env,
+      ctx2,
+    );
+
+    expect(res.status).toBe(200);
+    expect(seen.edgetunnel?.protocol).toBe('https:');
+    expect(seen.edgetunnel?.searchParams.get('token')).toBe(token);
+    expect(seen.yonggekkk?.protocol).toBe('https:');
+  });
+});
+
 // 回归：yonggekkk vendor 读小写 env.uuid；不传小写视图则回退硬编码 UUID，/${userID}/cl 分支永不命中
 describe('vendor env casing (yonggekkk lowercase uuid)', () => {
   it('passes lowercase uuid view to yonggekkk vendor', async () => {

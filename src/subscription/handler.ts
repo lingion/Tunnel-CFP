@@ -23,10 +23,14 @@ export async function handleSubscription(request: Request, env: Env, ctx: Execut
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // token 鉴权：token=MD5MD5(host+UUID)，与 vendor edgetunnel 订阅 token 同源。
+  // token 鉴权：token=MD5MD5(hostname+UUID)，与 vendor edgetunnel 订阅 token 同源。
+  // 必须用 hostname（无端口）而非 host（含端口）：vendor 内部 line 41-42 取 url.hostname
+  // 作 host 计算自己的订阅 TOKEN，handler 必须与 vendor 算法一致。
+  // 生产 HTTPS:443 下 host === hostname（端口省略），不影响用户；本地 wrangler dev:8787 下
+  // 必须统一 hostname 否则 handler 鉴权 vs vendor 内部鉴权 token 不一致。
   // 节点里的 UUID 本身就是连接凭证，订阅裸奔=泄露凭证。
   const token = url.searchParams.get('token');
-  const expected = await md5md5(url.host + env.UUID);
+  const expected = await md5md5(url.hostname + env.UUID);
   if (!token || token !== expected) {
     return new Response('Unauthorized', { status: 401 });
   }
@@ -233,10 +237,15 @@ async function fetchVendorYaml(
   const headers = new Headers(originalRequest.headers);
   headers.set('User-Agent', 'CF-Workers-SUB');
 
+  // 内部 vendor fetch 强制 HTTPS：edgetunnel vendor 在收到 http:// 时会返 301 跳 https，
+  // 内部 fetch 不跟 redirect 会抛 "Vendor edgetunnel returned 301"。
+  // 真实生产=https+本地 wrangler dev=http 都必须走 https:// vendor,不能跟 incoming protocol。
+  subUrl.protocol = 'https:';
+
   if (name === 'edgetunnel') {
     // edgetunnel: /sub?token=MD5MD5(host+userID)&target=mixed
     subUrl.pathname = '/sub';
-    const token = await md5md5(subUrl.host + userID);
+    const token = await md5md5(subUrl.hostname + userID);
     subUrl.searchParams.set('token', token);
     subUrl.searchParams.set('target', 'mixed');
   } else if (name === 'yonggekkk') {
