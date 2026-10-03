@@ -1,0 +1,19 @@
+# Tunnel-CFP secrets — required by the Deploy to Cloudflare wizard
+#
+# The deploy flow reads this file to know which secrets to ask you for.
+# Copy to .dev.vars for local `wrangler dev`; for a real deployment set
+# these in Dashboard → Workers → Settings → Variables and Secrets.
+#
+# Never commit .dev.vars (already gitignored). Values below are placeholders.
+
+# vendored edgetunnel panel key (required)
+KEY=
+
+# admin panel password (required)
+ADMIN=
+
+# Agent API key for /api/v1/* (required if you use the agent gateway)
+AGENT_KEY=
+
+# gates /proxy* behind ?key=<value> or Cookie: __proxy_key=<value> (optional)
+# PROXY_KEY=

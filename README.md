@@ -102,15 +102,51 @@ Stated plainly, so nobody has to discover them in production:
 - **Encrypted-client-hello (ECH) and post-quantum TLS are out of scope.** The edge terminates TLS with the cert of the deployed domain; nothing in the Worker stack can change what the edge negotiates.
 - **Not for high-throughput relay.** Workers' free tier (100k req/day) and CPU limits make this a personal-tool footprint by design. Heavy relay use will exhaust the quota and degrade other paths on the same Worker.
 
+<p align="center">
+  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/lingion/Tunnel-CFP"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"/></a>
+</p>
+
 ## Requirements
 
 - A Cloudflare account (free tier works)
-- Node.js ≥ 18 + npm
-- A `CLOUDFLARE_API_TOKEN` with Workers and KV permissions
+- Node.js ≥ 18 + npm (CLI path only)
+- A `CLOUDFLARE_API_TOKEN` with Workers and KV permissions (CLI path only)
 
 ## Quick Start
 
-### 1. Clone and install
+Pick one path:
+
+- **Path A — one-click deploy.** No local tooling, no config-file edits, nothing sensitive committed. Recommended if you just forked the repo.
+- **Path B — CLI deploy.** Full local `wrangler` flow, more control (worker name, custom domain in config).
+
+### Path A: Deploy to Cloudflare (one click)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/lingion/Tunnel-CFP)
+
+1. Click the button, authorize GitHub, and pick your fork (or this repository).
+2. The build command can stay **empty** — this is a plain TypeScript Worker and `wrangler` bundles it itself.
+3. The Worker reads its KV binding from `wrangler.toml`; Cloudflare **provisions a fresh KV namespace automatically** during setup. Leave the placeholder id in the config alone.
+4. After the deploy finishes, set your credentials in the dashboard — **not** in a commit:
+
+   Dashboard → **Workers & Pages → your Worker → Settings → Variables and Secrets**, add:
+
+   | Variable | Type | What it is |
+   |---|---|---|
+   | `UUID` | Text | Your UUIDv4 — the node credential. Generate one: `uuidgen` or any online UUIDv4 generator. |
+   | `KEY` | Secret | Vendored edgetunnel panel key |
+   | `ADMIN` | Secret | Admin panel password |
+   | `AGENT_KEY` | Secret | Agent API key (`/api/v1/*`) |
+   | `PROXY_KEY` | Secret (optional) | Gates `/proxy*` behind `?key=` / cookie |
+
+   Values changed here take effect on save, and they never touch git — a fork push cannot leak them.
+
+5. Smoke test (below), using the `*.workers.dev` domain the deploy printed.
+
+Why this order: the UUID is a node credential. If you edit it into `wrangler.toml` first and push, it is now public history in your fork. Configure credentials in the dashboard instead — that is why the checked-in config ships with placeholders.
+
+### Path B: CLI deploy
+
+#### 1. Clone and install
 
 ```bash
 git clone https://github.com/lingion/Tunnel-CFP.git
@@ -118,14 +154,14 @@ cd Tunnel-CFP
 npm install
 ```
 
-### 2. Create the KV namespace
+#### 2. Create the KV namespace
 
 ```bash
 npx wrangler kv namespace create KV
 # Copy the printed namespace id into wrangler.cfp.toml → kv_namespaces[0].id
 ```
 
-### 3. Configure `wrangler.cfp.toml`
+#### 3. Configure `wrangler.cfp.toml`
 
 Minimal edits — everything you must replace is marked in the file:
 
@@ -144,7 +180,7 @@ UUID = "00000000-0000-4000-8000-000000000000"  # ← replace with your own UUIDv
 # PROXY_KEY = "a-long-random-string"           # optional: gate /proxy* behind key/cookie
 ```
 
-### 4. Verify and deploy
+#### 4. Verify and deploy
 
 ```bash
 npx tsc --noEmit                              # typecheck
@@ -153,14 +189,14 @@ npx vitest run -c vitest.workers.config.ts    # workers-runtime suite (59 tests,
 npx wrangler deploy -c wrangler.cfp.toml
 ```
 
-### 5. Set secrets
+#### 5. Set secrets
 
 ```bash
 echo "<key>"   | npx wrangler secret put KEY   -c wrangler.cfp.toml   # vendored edgetunnel KEY
 echo "<admin>" | npx wrangler secret put ADMIN -c wrangler.cfp.toml   # admin panel password
 ```
 
-### 6. Smoke test
+#### 6. Smoke test
 
 ```bash
 # Health check (no auth)
