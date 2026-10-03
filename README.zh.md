@@ -102,15 +102,51 @@ vendored 引擎提供了隧道核心和管理面板。以下内容为本仓库�
 - **ECH(加密 ClientHello)和后量子 TLS 不在范围内。** 边缘用部署域名的证书终结 TLS,Worker 栈改变不了边缘协商什么。
 - **不适合高吞吐中继。** Workers 免费额度(每天 10 万请求)和 CPU 限制决定了这是个人工具体量。重中继用途会烧完配额,连累同一 Worker 上的其他路径。
 
+<p align="center">
+  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/lingion/Tunnel-CFP"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"/></a>
+</p>
+
 ## 环境要求
 
 - Cloudflare 账号(免费版够用)
-- Node.js ≥ 18 + npm
-- 具有 Workers 和 KV 权限的 `CLOUDFLARE_API_TOKEN`
+- Node.js ≥ 18 + npm(仅 CLI 路线需要)
+- 具有 Workers 和 KV 权限的 `CLOUDFLARE_API_TOKEN`(仅 CLI 路线需要)
 
 ## 快速开始
 
-### 1. 克隆与安装
+两条路线任选:
+
+- **路线 A —— 一键部署。** 不装本地工具、不改配置文件、不提交任何敏感信息。刚 fork 完仓库的人推荐走这条。
+- **路线 B —— CLI 部署。** 完整本地 `wrangler` 流程,可控项更多(Worker 名、自定义域名写进配置)。
+
+### 路线 A:一键部署到 Cloudflare
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/lingion/Tunnel-CFP)
+
+1. 点按钮、授权 GitHub、选中你的 fork(或本仓库)。
+2. **构建命令留空**即可——这是纯 TypeScript Worker,`wrangler` 自己打包,不需要构建步骤。
+3. Worker 的 KV 绑定声明在 `wrangler.toml` 里,Cloudflare 会在部署向导里**自动创建一个全新的 KV namespace** 并绑定。配置文件里的占位符 id 不用碰。
+4. 部署完成后,去 dashboard 配置凭证——**不是**写进 commit:
+
+   Dashboard → **Workers 和 Pages → 你的 Worker → 设置 → 变量和机值(Variables and Secrets)**,添加:
+
+   | 变量 | 类型 | 说明 |
+   |---|---|---|
+   | `UUID` | 文本 | 你的 UUIDv4——节点凭证。生成:`uuidgen` 或任意在线 UUIDv4 生成器。 |
+   | `KEY` | 机值(Secret) | vendored edgetunnel 面板 key |
+   | `ADMIN` | 机值(Secret) | 管理面板密码 |
+   | `AGENT_KEY` | 机值(Secret) | Agent API key(`/api/v1/*`) |
+   | `PROXY_KEY` | 机值(Secret,可选) | 给 `/proxy*` 加 `?key=` / Cookie 闸 |
+
+   在这里改值保存即生效,而且完全不经过 git——fork 推送泄不出去。
+
+5. 用部署完成后打印的 `*.workers.dev` 域名跑下面的烟雾测试。
+
+为什么是这个顺序:UUID 是节点凭证。如果你先把它改进 `wrangler.toml` 再 push,它就进了你 fork 的公开历史。凭证一律配在 dashboard——这就是仓库里配置文件只放假占位符的原因。
+
+### 路线 B:CLI 部署
+
+#### 1. 克隆与安装
 
 ```bash
 git clone https://github.com/lingion/Tunnel-CFP.git
@@ -118,14 +154,14 @@ cd Tunnel-CFP
 npm install
 ```
 
-### 2. 创建 KV namespace
+#### 2. 创建 KV namespace
 
 ```bash
 npx wrangler kv namespace create KV
 # 把打印出来的 namespace id 填进 wrangler.cfp.toml → kv_namespaces[0].id
 ```
 
-### 3. 配置 `wrangler.cfp.toml`
+#### 3. 配置 `wrangler.cfp.toml`
 
 最小改动——所有必须替换的位置都在文件里标了:
 
@@ -144,7 +180,7 @@ UUID = "00000000-0000-4000-8000-000000000000"  # ← 换成你自己的 UUIDv4(�
 # PROXY_KEY = "一串长随机字符"                    # 可选:给 /proxy* 加 key/Cookie 闸
 ```
 
-### 4. 校验并部署
+#### 4. 校验并部署
 
 ```bash
 npx tsc --noEmit                              # 类型检查
@@ -153,14 +189,14 @@ npx vitest run -c vitest.workers.config.ts    # workers-runtime 测试(59 个,mi
 npx wrangler deploy -c wrangler.cfp.toml
 ```
 
-### 5. 设置 secrets
+#### 5. 设置 secrets
 
 ```bash
 echo "<key>"   | npx wrangler secret put KEY   -c wrangler.cfp.toml   # vendored edgetunnel 的 KEY
 echo "<admin>" | npx wrangler secret put ADMIN -c wrangler.cfp.toml   # 管理面板密码
 ```
 
-### 6. 烟雾测试
+#### 6. 烟雾测试
 
 ```bash
 # 健康检查(无需鉴权)
