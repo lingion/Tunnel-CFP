@@ -456,11 +456,13 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
   for (const [k, v] of Array.from(out.entries())) {
     const lower = k.toLowerCase();
     // 去掉代理相关头,避免跳回原站
+    // 注意: sec-fetch-* 不删(2026-10-31 纯净度修复)——Sec-Fetch 是浏览器
+    // forbidden headers,页面脚本伪造不了,入站值可信;全删反而制造
+    // "带 sec-ch-ua 无 Fetch 元数据"的自动化工具教科书指纹(httpbingo 实测+sicuranext 判定逻辑)
     if (
       lower === 'host' ||
       lower.startsWith('cf-') ||
       lower.startsWith('x-forwarded-') ||
-      lower.startsWith('sec-fetch-') ||
       lower === 'cdn-loop' ||
       lower === 'content-length' ||
       lower === 'accept-encoding'
@@ -474,10 +476,14 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
   if (referer) {
     try {
       const r = new URL(referer);
-      // Referer 是目标站页面经浏览器写入的,实际形态是
-      // "https://cfp域/proxy/<完整url>"(浏览器会把整个 path+query 编码进 href,
-      // URL 解析后 pathname 含 /proxy/https://...,query 挂尾)
-      const m = r.pathname.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
+      // Referer 是目标站页面经浏览器写入的,主流形态是
+      // "https://cfp域/proxy/<完整url>"(url-resolver/shim 拼 href 不编码,浏览器
+      // 序列化保持原样);工具手拼可能用全编码形态 "/proxy/https%3A%2F%2F..."。
+      // 两形态都要识别,否则 Referer 留在 cfp 域 = 目标站眼里"跨站来源"+指纹不一致
+      const rawPath = r.pathname;
+      const decodedPath = (() => { try { return decodeURIComponent(r.pathname); } catch { return rawPath; } })();
+      const m = rawPath.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i)
+        || decodedPath.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
       if (m) {
         // query 别丢:Referer 带目标站 query 时(站内跳转场景) stripping 会让
         // 部分站 referer 校验/统计断链
@@ -491,5 +497,63 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
     const origin = out.get('origin');
     if (origin && origin !== tOrigin) out.set('origin', tOrigin);
   } catch { /* 保原值 */ }
+
+  // —— 指纹一致性(2026-10-31 纯净度修复,见 test/workers-runtime/header-fingerprint.test.ts) ——
+  const ua = out.get('user-agent') || '';
+  const isBrowserUA = /Mozilla\/5\.0/.test(ua) && /(Chrome|Firefox|Safari|Edg)\//.test(ua);
+  if (isBrowserUA) {
+    // Sec-Fetch-* 缺哪个补哪个(有值必是浏览器发的 forbidden header,可信透传)
+    const meta = inferFetchMetadata(target, out);
+    if (!out.has('sec-fetch-dest')) out.set('Sec-Fetch-Dest', meta.dest);
+    if (!out.has('sec-fetch-mode')) out.set('Sec-Fetch-Mode', meta.mode);
+    if (!out.has('sec-fetch-site')) out.set('Sec-Fetch-Site', meta.site);
+
+    // UA 声称 Chrome 大版本而 sec-ch-ua 数字对不上 → 以 UA 为准重写(消除版本矛盾)
+    const ch = out.get('sec-ch-ua');
+    const uaMajor = ua.match(/Chrome\/(\d+)/)?.[1];
+    if (ch && uaMajor) {
+      const chMajor = ch.match(/v="(\d+)"/)?.[1];
+      if (chMajor && chMajor !== uaMajor) {
+        out.set('Sec-CH-UA', ch.replace(/v="\d+"/g, `v="${uaMajor}"`));
+      }
+    }
+  }
   return out;
+}
+
+/** 按请求语境推断浏览器必发的 Sec-Fetch 三元组(仅缺值时使用) */
+function inferFetchMetadata(
+  target: string,
+  headers: Headers,
+): { dest: string; mode: string; site: string } {
+  const t = new URL(target);
+  const accept = (headers.get('accept') || '').toLowerCase();
+  const referer = headers.get('referer');
+  const ext = t.pathname.match(/\.([a-z0-9]+)(?:$|[?#])/i)?.[1]?.toLowerCase() ?? '';
+
+  let dest = 'document';
+  if (ext === 'css' || accept.includes('text/css')) dest = 'style';
+  else if (ext === 'js' || ext === 'mjs') dest = 'script';
+  else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'ico'].includes(ext)) dest = 'image';
+  else if (['woff', 'woff2', 'ttf', 'otf', 'eot'].includes(ext)) dest = 'font';
+  else if (['mp4', 'webm', 'vtt'].includes(ext)) dest = 'video';
+  else if (['mp3', 'ogg', 'wav'].includes(ext)) dest = 'audio';
+  else if (accept === '*/*' || accept.includes('application/json') || (!referer && !accept.includes('text/html'))) dest = 'empty';
+
+  // 经典 <script> 与样式/图片/字体/媒体走 no-cors;document 是 navigate;其余(empty/api)是 cors
+  const mode =
+    dest === 'document' ? 'navigate'
+    : ['style', 'script', 'image', 'font', 'video', 'audio'].includes(dest) ? 'no-cors'
+    : 'cors';
+
+  // site 基于改写后的 Referer:目标站自家页面发起 → same-origin;无 Referer(直接导航)→ none
+  let site = 'none';
+  if (referer) {
+    try {
+      site = new URL(referer).host === t.host ? 'same-origin' : 'cross-site';
+    } catch {
+      site = 'cross-site';
+    }
+  }
+  return { dest, mode, site };
 }
