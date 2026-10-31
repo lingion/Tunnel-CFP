@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy:cfp": "wrangler deploy -c wrangler.cfp.toml",
+    "deploy": "echo '已禁用: 无配置的 wrangler 调用会读默认 wrangler.toml(name=proxy)打挂另一个线上 Worker。cfp 部署用 npm run deploy:cfp,先跑 npx wrangler deploy -c wrangler.cfp.toml --dry-run 核对 script name=cfp;见 test/repo-ops-contract.test.ts' && exit 1",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
