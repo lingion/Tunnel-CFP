@@ -18,7 +18,8 @@ const env = {
 } as unknown as Env;
 
 describe('全局兜底壳', () => {
-  it('handler 抛错时返回 500 JSON 而非向外 reject', async () => {
+  it('handler 抛错时返回 500 JSON 而非向外 reject,且留 console.error 诊断痕迹', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const req = new Request('https://worker.test/api/v1/anything');
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
     // 关键:整个 promise 必须 resolve,不能 reject
@@ -28,7 +29,15 @@ describe('全局兜底壳', () => {
     expect(res.headers.get('Cache-Control')).toBe('no-store');
     const body = await res.json();
     expect(body).toEqual({ error: 'internal' });
-    // 不泄露内部错误信息
+    // 不泄露内部错误信息给访客
     expect(JSON.stringify(body)).not.toContain('boom');
+    // 但排障通道必须留痕(2026-10-31 红队: 静默吞错在采样 0.1 下线上零抓手)
+    expect(spy).toHaveBeenCalledOnce();
+    const logged = String(spy.mock.calls[0]![0]);
+    expect(logged).toContain('[cfp-500]');
+    expect(logged).toContain('boom'); // 错误消息进日志(不进响应)
+    // 诊断行不得含完整 URL/query(凭证防泄露)
+    expect(logged).not.toContain('/api/v1/anything');
+    spy.mockRestore();
   });
 });
