@@ -94,6 +94,10 @@ export async function handleWsBridge(request: Request): Promise<Response> {
     writeChain.catch(() => { /* 泵侧关闭后写入失败,静默 */ });
   };
 
+  // 浏览器→源站接线(round6 重构曾漏接此线,上行每帧静默丢 —— 2026-10-31 修复,
+  // 接线契约由 test/proxy-web/ws-bridge-uplink.test.ts 行为级锁定)
+  wireBrowserToOrigin(server, sendToOrigin);
+
   // TCP → WS:读 origin 响应流,校验 accept 后按 WS 帧透传给浏览器。
   // 状态机全部收进本连接的闭包(多连接并发安全,无共享单槽)
   void pumpSocketToWs(socket, server, acceptHash, sendToOrigin);
@@ -260,6 +264,23 @@ async function pumpSocketToWs(
       try { ws.close(1011, msg || 'bridge read error'); } catch { /* closed */ }
     }
   })();
+}
+
+/** 浏览器→源站上行接线:WS message 事件封成掩码客户端帧进写链。
+ *  独立导出为可测单元 — round6 重构漏接此线导致上行静默丢帧,行为级测试锁死。 */
+export function wireBrowserToOrigin(
+  server: WebSocket,
+  sendToOrigin: (frame: Uint8Array) => void,
+): void {
+  server.addEventListener('message', (ev: MessageEvent) => {
+    const binary = typeof ev.data !== 'string';
+    const bytes = binary
+      ? new Uint8Array(ev.data as ArrayBuffer)
+      : new TextEncoder().encode(ev.data as string);
+    // opcode 映射:文本 0x1 / 二进制 0x2(RFC 6455;close 帧由 Workers WS 事件的
+    // close 语义走 server close 监听器,不经 message)
+    sendToOrigin(encodeClientFrame(bytes, binary ? 0x2 : 0x1));
+  });
 }
 
 function sendToBrowser(ws: WebSocket, opcode: number, payload: Uint8Array): void {
