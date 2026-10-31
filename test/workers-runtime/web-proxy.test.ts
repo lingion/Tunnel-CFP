@@ -386,7 +386,7 @@ describe('round3: header hygiene', () => {
     await flush();
   });
 
-  it('strips Sec-Fetch-* and CDN loop headers on the way out', async () => {
+  it('passes Sec-Fetch-* through (fingerprint consistency 2026-10-31) but strips CDN/forwarded headers', async () => {
     let seen: Record<string, string> = {};
     vi.stubGlobal('fetch', vi.fn(async (_t: any, init: any) => {
       init.headers.forEach((v: string, k: string) => (seen[k] = v));
@@ -400,7 +400,11 @@ describe('round3: header hygiene', () => {
         'X-Forwarded-For': '1.2.3.4',
       },
     }));
-    expect(seen['sec-fetch-site']).toBeUndefined();
+    // 旧契约"删 Sec-Fetch-*"已推翻:全删制造"带 CH 无 Fetch"自动化指纹。
+    // 新契约:入站值透传(浏览器 forbidden headers 不可伪造,可信)
+    expect(seen['sec-fetch-site']).toBe('same-origin');
+    expect(seen['sec-fetch-mode']).toBe('navigate');
+    // 卫生头剥离不变
     expect(seen['cdn-loop']).toBeUndefined();
     expect(seen['x-forwarded-for']).toBeUndefined();
   });

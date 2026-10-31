@@ -65,7 +65,7 @@ export async function handleWebProxy(request: Request, waitUntil?: (p: Promise<a
   try {
     targetRes = await fetch(target, {
       method: request.method,
-      headers: sanitizeOutgoingHeaders(request.headers, target),
+      headers: sanitizeOutgoingHeaders(request.headers, target, request.method),
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
       // @ts-expect-error — workers types require manual duplex opt-in for streaming bodies
       duplex: 'half',
@@ -450,17 +450,19 @@ function unisolateCookies(headers: Headers, targetHost: string): Headers {
   return out;
 }
 
-function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
+function sanitizeOutgoingHeaders(headers: Headers, target: string, method = 'GET'): Headers {
   const targetHost = new URL(target).host;
   const out = unisolateCookies(headers, targetHost);
   for (const [k, v] of Array.from(out.entries())) {
     const lower = k.toLowerCase();
     // 去掉代理相关头,避免跳回原站
+    // 注意: sec-fetch-* 不删(2026-10-31 纯净度修复)——Sec-Fetch 是浏览器
+    // forbidden headers,页面脚本伪造不了,入站值可信;全删反而制造
+    // "带 sec-ch-ua 无 Fetch 元数据"的自动化工具教科书指纹(httpbingo 实测+sicuranext 判定逻辑)
     if (
       lower === 'host' ||
       lower.startsWith('cf-') ||
       lower.startsWith('x-forwarded-') ||
-      lower.startsWith('sec-fetch-') ||
       lower === 'cdn-loop' ||
       lower === 'content-length' ||
       lower === 'accept-encoding'
@@ -474,14 +476,26 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
   if (referer) {
     try {
       const r = new URL(referer);
-      // Referer 是目标站页面经浏览器写入的,实际形态是
-      // "https://cfp域/proxy/<完整url>"(浏览器会把整个 path+query 编码进 href,
-      // URL 解析后 pathname 含 /proxy/https://...,query 挂尾)
-      const m = r.pathname.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
+      // Referer 是目标站页面经浏览器写入的,主流形态是
+      // "https://cfp域/proxy/<完整url>"(url-resolver/shim 拼 href 不编码,浏览器
+      // 序列化保持原样);工具手拼可能用全编码形态 "/proxy/https%3A%2F%2F..."。
+      // 两形态都要识别,否则 Referer 留在 cfp 域 = 目标站眼里"跨站来源"+指纹不一致
+      const rawPath = r.pathname;
+      const decodedPath = (() => { try { return decodeURIComponent(r.pathname); } catch { return rawPath; } })();
+      const mRaw = rawPath.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
+      const m = mRaw || decodedPath.match(/^\/proxy\/(https?):\/\/([^/?]+)(.*)$/i);
       if (m) {
         // query 别丢:Referer 带目标站 query 时(站内跳转场景) stripping 会让
-        // 部分站 referer 校验/统计断链
-        out.set('referer', `${m[1]}://${m[2]}${m[3] || ''}${r.search}`);
+        // 部分站 referer 校验/统计断链。
+        // 但 cfp 侧凭证必须剥(2026-10-31 edge-cases 确认项):?key= 通道是
+        // auth.ts 明文支持的,页面 URL 的 query 混着 cfp key 与目标站参数,
+        // 原样回送 = 用量闸凭证进目标站 access log,违反 :25 自订的"key 绝不转发"不变量
+        let ref = `${m[1]}://${m[2]}${dropKeyFromQuery(m[3] || '')}${dropKeyFromQuery(r.search)}`;
+        // decodedPath 命中(rawPath 不中)时 m 段已 percent-decode,非 ASCII
+        // 直接 set 会被 workerd 裸 UTF-8 写线上 wire(真机 echo 实测,违反 RFC 9110
+        // 头值 ASCII 约束)——落头前重新转义,保留合法 %XX 不双重编码
+        if (!mRaw) ref = reescapeHeaderUrl(ref);
+        out.set('referer', ref);
       }
     } catch { /* 保原值 */ }
   }
@@ -491,5 +505,159 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
     const origin = out.get('origin');
     if (origin && origin !== tOrigin) out.set('origin', tOrigin);
   } catch { /* 保原值 */ }
+
+  // —— 指纹一致性(2026-10-31 纯净度修复,见 test/workers-runtime/header-fingerprint.test.ts) ——
+  const ua = out.get('user-agent') || '';
+  const isBrowserUA = /Mozilla\/5\.0/.test(ua) && /(Chrome|Firefox|Safari|Edg)\//.test(ua);
+  if (isBrowserUA) {
+    // Sec-Fetch-Site 恒按改写后的 Referer 与 target 关系重算(2026-10-31 二期):
+    // 入站值是"浏览器↔cfp"视角(代理页所有子资源恒 same-origin),与改写后的
+    // 目标站 Referer/Origin 拼在一起是真实浏览器不可能产生的组合
+    // (deploy-regression 确认项)。Dest/Mode 由资源类型决定,cfp 页与真实页
+    // 一致,继续可信透传。
+    out.set('Sec-Fetch-Site', siteFromReferer(out.get('referer'), new URL(target)));
+
+    // Dest/Mode 补齐按内核能力门控(2026-10-31 deploy-regression 确认项):
+    // Sec-Fetch 元数据 WebKit 16.4+/Chromium 80+/Firefox 90+ 才发;给从不发它的
+    // 旧内核强补三元组,反而把原生干净指纹(UA 声称 Version/15,确实无头)推成矛盾态。
+    // 门控只管缺值补齐——入站有值是事实,不否定。
+    if (uaSendsFetchMetadata(ua)) {
+      const meta = inferFetchMetadata(target, out, method);
+      if (!out.has('sec-fetch-dest')) out.set('Sec-Fetch-Dest', meta.dest);
+      if (!out.has('sec-fetch-mode')) out.set('Sec-Fetch-Mode', meta.mode);
+    }
+
+    // UA 声称 Chrome 大版本而 sec-ch-ua 数字对不上 → 以 UA 为准重写(消除版本矛盾)
+    // 品牌白名单:只改 Chromium/Google Chrome/Microsoft Edge 等真实引擎品牌,
+    // GREASE 占位品牌(Not_A Brand/Not(A:Brand 等,版本必≠主版本且随机序排列)
+    // 原样保留 —— g 全局替换会把 GREASE 抬成主版本,产出真实浏览器从不发的品牌列表
+    const ch = out.get('sec-ch-ua');
+    const uaMajor = ua.match(/Chrome\/(\d+)/)?.[1];
+    if (ch && uaMajor) {
+      const REAL_BRAND_RE = /((?:"(?:Chromium|Google Chrome|Microsoft Edge)")\s*;\s*v=")(\d+)(")/g;
+      const chMajor = ch.match(REAL_BRAND_RE)?.[0]
+        ? ch.replace(REAL_BRAND_RE, (_m, p1, p2, p3) => p1 + uaMajor + p3)
+        : null;
+      if (chMajor && chMajor !== ch) out.set('Sec-CH-UA', chMajor);
+    }
+  }
   return out;
+}
+
+/** 按请求语境推断浏览器必发的 Sec-Fetch 三元组(仅缺值时使用) */
+function inferFetchMetadata(
+  target: string,
+  headers: Headers,
+  method: string,
+): { dest: string; mode: string; site: string } {
+  const t = new URL(target);
+  const accept = (headers.get('accept') || '').toLowerCase();
+  const referer = headers.get('referer');
+  const ext = t.pathname.match(/\.([a-z0-9]+)(?:$|[?#])/i)?.[1]?.toLowerCase() ?? '';
+  const isNavAccept = accept.includes('text/html') || accept.includes('application/xhtml');
+
+  // 方法感知(2026-10-31 workflow 红队修复):
+  // OPTIONS 预检在浏览器固定 empty/cors 且从不带导航语义;
+  // 非 GET/HEAD 无 text/html Accept 按 XHR/API 调用处理,不得产生 navigate
+  if (method === 'OPTIONS') {
+    return { dest: 'empty', mode: 'cors', site: siteFromReferer(referer, t) };
+  }
+
+  let dest = 'document';
+  if (method !== 'GET' && method !== 'HEAD' && !isNavAccept) dest = 'empty';
+  else if (ext === 'css' || accept.includes('text/css')) dest = 'style';
+  else if (ext === 'js' || ext === 'mjs') dest = 'script';
+  else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'ico'].includes(ext)) dest = 'image';
+  else if (['woff', 'woff2', 'ttf', 'otf', 'eot'].includes(ext)) dest = 'font';
+  else if (['mp4', 'webm', 'vtt'].includes(ext)) dest = 'video';
+  else if (['mp3', 'ogg', 'wav'].includes(ext)) dest = 'audio';
+  else if (accept === '*/*' || accept.includes('application/json') || (!referer && !isNavAccept)) dest = 'empty';
+
+  // 经典 <script> 与样式/图片/字体/媒体走 no-cors;document 是 navigate;其余(empty/api)是 cors
+  const mode =
+    dest === 'document' ? 'navigate'
+    : ['style', 'script', 'image', 'font', 'video', 'audio'].includes(dest) ? 'no-cors'
+    : 'cors';
+
+  return { dest, mode, site: siteFromReferer(referer, t) };
+}
+
+/** 剥掉 URL path+query 串里的 cfp 侧凭证参数(key/__proxy_key),其余 query 原样保留 */
+function dropKeyFromQuery(s: string): string {
+  const qi = s.indexOf('?');
+  if (qi === -1) return s;
+  const head = s.slice(0, qi);
+  const kept = s
+    .slice(qi + 1)
+    .split('&')
+    .filter((kv) => {
+      const name = decodeURIComponent((kv.split('=')[0] ?? '')).toLowerCase();
+      return name !== 'key' && name !== '__proxy_key';
+    });
+  return kept.length ? `${head}?${kept.join('&')}` : head;
+}
+
+/** 重新转义 URL 至纯 ASCII(头值约束):保护已合法的 %XX 不被双重编码,
+ *  其余非 ASCII/空白/控制字符按 encodeURI 落百分号 */
+function reescapeHeaderUrl(u: string): string {
+  return u
+    .split(/(%[0-9A-Fa-f]{2})/g)
+    .map((seg) => (/^%[0-9A-Fa-f]{2}$/.test(seg) ? seg.toUpperCase() : encodeURI(seg).replace(/#/g, '%23')))
+    .join('');
+}
+
+/** 内核能力门控:该 UA 声明的浏览器是否实际发送 Sec-Fetch 元数据。
+ *  Chromium 80+ / Firefox 90+ / WebKit 16.4+;iOS 第三方浏览器(CriOS/FxiOS/
+ *  EdgiOS)内核恒为 WKWebView 且版本与 UA 数字脱钩,微信 XWEB 信号不可靠,
+ *  一律按不发送处理(deploy-regression 确认项:给从不发的旧内核补三元组,
+ *  把原生干净指纹推成 UA↔能力矛盾态,比不补更可疑) */
+function uaSendsFetchMetadata(ua: string): boolean {
+  if (/MicroMessenger|WXBrowser/i.test(ua)) return false;
+  if (/CriOS|FxiOS|EdgiOS/.test(ua)) return false;
+  const ios = ua.match(/CPU (?:iPhone|iPad|iPod) OS (\d+)(?:_(\d+))?/);
+  if (ios) {
+    const maj = Number(ios[1]);
+    const min = Number(ios[2] ?? 0);
+    return maj > 16 || (maj === 16 && min >= 4);
+  }
+  const ver = ua.match(/Version\/(\d+)(?:\.(\d+))?/);
+  const isPureWebKit = /AppleWebKit\//.test(ua) && !/Chrome\//.test(ua) && /Safari\/[\d.]+$/.test(ua) && !!ver;
+  if (isPureWebKit) {
+    const maj = Number(ver![1]);
+    const min = Number(ver![2] ?? 0);
+    return maj > 16 || (maj === 16 && min >= 4); // macOS Safari 16.4+
+  }
+  const chrome = ua.match(/(?:Chrome|Edg)\/(\d+)/);
+  if (chrome) return Number(chrome[1]) >= 80;
+  const ff = ua.match(/Firefox\/(\d+)/);
+  if (ff) return Number(ff[1]) >= 90;
+  return false;
+}
+
+/** site 值按 fetch 规范四态计算(2026-10-31 二期重写,旧实现只看 host 相等):
+ *  same-origin = scheme+host+port 三元组全等(port 归一,host 尾点归一);
+ *  same-site = registrable domain(eTLD+1 启发式)相等,与 scheme/port 无关;
+ *  其余 cross-site;无 Referer(顶级导航)→ none */
+function siteFromReferer(referer: string | null, t: URL): string {
+  if (!referer) return 'none';
+  let r: URL;
+  try {
+    r = new URL(referer);
+  } catch {
+    return 'cross-site';
+  }
+  const nh = (h: string) => h.toLowerCase().replace(/\.$/, '');
+  const port = (u: URL) => u.port || (u.protocol === 'https:' ? '443' : u.protocol === 'http:' ? '80' : '');
+  if (r.protocol === t.protocol && nh(r.hostname) === nh(t.hostname) && port(r) === port(t)) {
+    return 'same-origin';
+  }
+  const reg = (h: string) => {
+    const p = nh(h).split('.');
+    if (p.length <= 2) return p.join('.');
+    // 粗启发式:co/com/net/org/gov/edu/ac 作倒数第二段时(如 foo.co.uk)取三段;
+    // 完整 PSL 不现实(体积与更新),误判只会把 same-site 降为 cross-site,保守可接受
+    const TWO_LEVEL = ['co', 'com', 'net', 'org', 'gov', 'edu', 'ac'];
+    return TWO_LEVEL.includes(p[p.length - 2]!) ? p.slice(-3).join('.') : p.slice(-2).join('.');
+  };
+  return reg(r.hostname) === reg(t.hostname) ? 'same-site' : 'cross-site';
 }
