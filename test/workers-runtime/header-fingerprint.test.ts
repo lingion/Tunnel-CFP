@@ -22,11 +22,13 @@ async function outgoingHeaders(req: Request): Promise<Headers> {
   vi.stubGlobal('fetch', mock as any);
   const res = await handleWebProxy(req);
   await res.text();
-  // 只取对 https://target.com 的 fetch(排除 HTML 管线里的其他调用)
+  // 取发往本用例目标 host 的 fetch(排除 HTML 管线里的其他调用)
+  const wantHost = new URL(req.url).pathname.split('/proxy/')[1]?.split('/')[0] ?? '';
+  const host = decodeURIComponent(wantHost).split('/')[0]?.replace(/^https?:\/\//, '') ?? wantHost;
   const call = mock.mock.calls.find(
-    (c) => String(c[0]).includes('target.com')
+    (c) => String(c[0]).includes(host)
   );
-  if (!call) throw new Error('no fetch call to target.com; calls=' + mock.mock.calls.map((c) => String(c[0])).join(','));
+  if (!call) throw new Error(`no fetch call to ${host}; calls=` + mock.mock.calls.map((c) => String(c[0])).join(','));
   const init = call[1] as RequestInit;
   return new Headers(init.headers as HeadersInit);
 }
@@ -39,19 +41,187 @@ beforeEach(() => {
 });
 
 describe('sanitizeOutgoingHeaders 指纹一致性', () => {
-  it('透传入站的 Sec-Fetch-* 头(不再删除)', async () => {
+  it('Sec-Fetch-Site 按目标站语境重算,不盲透传 cfp 视角值', async () => {
+    // 代理页在 cfp 域,浏览器对 cfp→cfp 子资源恒发 same-origin——该值描述的是
+    // 浏览器↔cfp 关系,原样带给 B.com 会与改写后的外域 Referer 构成不可能组合
+    // (workflow deploy-regression 确认项)。新契约:重算,不采信入站 site。
+    const h = await outgoingHeaders(
+      proxyReq('https://cdn.other.com/logo.png', {
+        'User-Agent': CHROME_UA,
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Dest': 'image',
+        'Sec-Fetch-Site': 'same-origin', // 入站是 cfp 视角真值
+        Referer: `${SELF}/proxy/https://a.com/page`, // 改写后 = https://a.com/page
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('cross-site'); // a.com → cdn.other.com
+    expect(h.get('sec-fetch-mode')).toBe('no-cors'); // dest/mode 照旧透传
+    expect(h.get('sec-fetch-dest')).toBe('image');
+  });
+
+  it('无 Referer 顶级导航:入站 site 一律重写为 none', async () => {
     const h = await outgoingHeaders(
       proxyReq('https://target.com/', {
         'User-Agent': CHROME_UA,
+        'Sec-Fetch-Site': 'cross-site',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Site': 'cross-site',
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('none');
+  });
+
+  it('同主域不同子域补发 same-site(真实浏览器值域)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/page', {
+        'User-Agent': CHROME_UA,
+        Referer: `${SELF}/proxy/https%3A%2F%2Fcdn.target.com%2Fapp.js`, // 改写后 cdn.target.com
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('same-site'); // 补齐路径同样走新算法
+  });
+
+  it('scheme 降级 https referer → http target 判 same-site', async () => {
+    // fetch spec: same-origin 比 tuple origin(scheme/host/port),scheme 不同即否定;
+    // same-site 比 site for web = registrable domain,与 scheme 无关。
+    // (红队 finding 建议值 cross-site 不符规范,验证层按规范修正)
+    const h = await outgoingHeaders(
+      proxyReq('http://target.com/page', {
+        'User-Agent': CHROME_UA,
+        Referer: `${SELF}/proxy/https://target.com/secure`, // 改写后同 host https
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('same-site');
+  });
+
+  it('port 差异同主域判 same-site', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/api', {
+        'User-Agent': CHROME_UA,
+        Referer: `${SELF}/proxy/https://target.com:8443/page`,
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('same-site');
+  });
+
+  it('FQDN 尾点归一:target.com. 与 target.com 判 same-origin', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/page', {
+        'User-Agent': CHROME_UA,
+        Referer: `${SELF}/proxy/https://target.com./page`,
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('same-origin');
+  });
+
+  it('iOS15 Safari UA 不补 Sec-Fetch(该内核从不发)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Mobile/15E148 Safari/604.1',
+        Accept: 'text/html',
+      })
+    );
+    expect(h.get('sec-fetch-mode')).toBeNull(); // 补了反而与 UA 能力矛盾
+    expect(h.get('sec-fetch-dest')).toBeNull();
+  });
+
+  it('iOS17 Safari UA 正常补齐', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+        Accept: 'text/html',
       })
     );
     expect(h.get('sec-fetch-mode')).toBe('navigate');
-    expect(h.get('sec-fetch-dest')).toBe('document');
-    expect(h.get('sec-fetch-site')).toBe('cross-site');
   });
+
+  it('CriOS(WebKit 内核,UA 却含 Chrome/)不补', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1',
+        Accept: 'text/html',
+      })
+    );
+    expect(h.get('sec-fetch-mode')).toBeNull();
+  });
+
+  it('Android 微信内置浏览器(MicroMessenger)不补', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.105 MQQBrowser/13.2 MicroMessenger/8.0.20 XWEB/4283 MMWEBSDK/20221011 Mobile Safari/537.36 MMWEBID/6543',
+        Accept: 'text/html',
+      })
+    );
+    expect(h.get('sec-fetch-mode')).toBeNull();
+  });
+
+  it('Firefox rv/120 补,rv/88 不补(90 前无 Fetch 元数据)', async () => {
+    const hNew = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:120.0) Gecko/20100101 Firefox/120.0',
+        Accept: 'text/html',
+      })
+    );
+    expect(hNew.get('sec-fetch-mode')).toBe('navigate');
+    const hOld = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:88.0) Gecko/20100101 Firefox/88.0',
+        Accept: 'text/html',
+      })
+    );
+    expect(hOld.get('sec-fetch-mode')).toBeNull();
+  });
+
+  it('门控只管补齐:入站带值就照重算透传(有值即事实)', async () => {
+    // iOS15 内核理论上不发,但入站真带了(未来内核升级/中间层注入)——不否定事实
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Mobile/15E148 Safari/604.1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+      })
+    );
+    expect(h.get('sec-fetch-dest')).toBe('document');
+    expect(h.get('sec-fetch-mode')).toBe('navigate');
+    expect(h.get('sec-fetch-site')).toBe('none'); // 重算路径仍生效
+  });
+
+  it('Referer 改写剥掉 cfp 侧 ?key= 凭证(对齐 merged.delete(key) 不变量)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/a.css', {
+        'User-Agent': CHROME_UA,
+        Referer: `${SELF}/proxy/https://target.com/page?key=SECRET9x&x=1`,
+      })
+    );
+    const ref = h.get('referer')!;
+    expect(ref).toBe('https://target.com/page?x=1');
+    expect(ref).not.toContain('SECRET9x');
+  });
+
+  it('decodedPath 形态的 Referer 输出纯 ASCII(非 ASCII 重转义)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/item/next', {
+        'User-Agent': CHROME_UA,
+        // 全编码形态含 percent-CJK:decodedPath 命中,旧实现把解码后的裸中文写头
+        Referer: `${SELF}/proxy/https%3A%2F%2Ftarget.com%2Fitem%2F%E4%B8%AD%E5%9B%BD`,
+      })
+    );
+    const ref = h.get('referer')!;
+    expect(ref).toBe('https://target.com/item/%E4%B8%AD%E5%9B%BD');
+    // RFC 9110:头值只允许 ASCII/latin1
+    // eslint-disable-next-line no-control-regex
+    expect(/[^\x00-\x7F]/.test(ref)).toBe(false);
+  });
+
+  it('非浏览器 UA 流量不干预 Sec-Fetch 透传(伪造者自担)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'Sec-Fetch-Site': 'same-origin', // curl 伪造,无 Mozilla UA
+      })
+    );
+    expect(h.get('sec-fetch-site')).toBe('same-origin'); // 不重算不重写
+  });
+
 
   it('UA 是 Chrome 导航请求但缺 Sec-Fetch 时,补齐 navigate/document/none', async () => {
     const h = await outgoingHeaders(
