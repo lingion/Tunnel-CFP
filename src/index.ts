@@ -12,6 +12,18 @@ import { handleSubscription } from "./subscription/handler";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // 全局兜底:任何 handler 抛未捕获异常 → 与伪装页同形态的 500 JSON(不泄栈,
+    // 不留 Worker Exception 页给扫描器);ctx 未消费,保留全部 waitUntil 能力
+    return routeRequest(request, env, ctx).catch(
+      () => new Response(JSON.stringify({ error: "internal" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      })
+    );
+  },
+};
+
+async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
@@ -39,5 +51,4 @@ export default {
     const rescued = rescueNavigation(request);
     if (rescued) return rescued;
     return edgetunnel.fetch(request, env, ctx);
-  },
-};
+}
