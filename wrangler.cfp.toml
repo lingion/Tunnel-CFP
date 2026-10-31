@@ -11,6 +11,11 @@ routes = [
 # cfp Worker — v3 新部署目标
 # 与本账户其他 Worker 共用 CF account
 
+# ⚠ 部署闸:本文件是公开模板,占位符值与线上真实值漂移。
+# 若目标 Worker 已部署过(线上有自己的 KV namespace id 与 UUID binding),
+# 直接 `wrangler deploy -c wrangler.cfp.toml` 会用占位符覆盖线上绑定,
+# 面板配置/订阅瞬间全废。部署前先查线上 bindings 并把本文件对齐真实值
+# (GET /accounts/{acc}/workers/scripts/{name}/bindings),真实值永不 commit 进公开仓。
 # KV:独立 KV namespace(部署时用 `npx wrangler kv namespace create KV` 创建,把 id 填进来)
 # vendor edgetunnel 硬编码 env.KV，所以 binding 必须叫 "KV"
 [[kv_namespaces]]
