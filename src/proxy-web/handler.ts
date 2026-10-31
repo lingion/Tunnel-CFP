@@ -65,7 +65,7 @@ export async function handleWebProxy(request: Request, waitUntil?: (p: Promise<a
   try {
     targetRes = await fetch(target, {
       method: request.method,
-      headers: sanitizeOutgoingHeaders(request.headers, target),
+      headers: sanitizeOutgoingHeaders(request.headers, target, request.method),
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
       // @ts-expect-error — workers types require manual duplex opt-in for streaming bodies
       duplex: 'half',
@@ -450,7 +450,7 @@ function unisolateCookies(headers: Headers, targetHost: string): Headers {
   return out;
 }
 
-function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
+function sanitizeOutgoingHeaders(headers: Headers, target: string, method = 'GET'): Headers {
   const targetHost = new URL(target).host;
   const out = unisolateCookies(headers, targetHost);
   for (const [k, v] of Array.from(out.entries())) {
@@ -503,19 +503,23 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
   const isBrowserUA = /Mozilla\/5\.0/.test(ua) && /(Chrome|Firefox|Safari|Edg)\//.test(ua);
   if (isBrowserUA) {
     // Sec-Fetch-* 缺哪个补哪个(有值必是浏览器发的 forbidden header,可信透传)
-    const meta = inferFetchMetadata(target, out);
+    const meta = inferFetchMetadata(target, out, method);
     if (!out.has('sec-fetch-dest')) out.set('Sec-Fetch-Dest', meta.dest);
     if (!out.has('sec-fetch-mode')) out.set('Sec-Fetch-Mode', meta.mode);
     if (!out.has('sec-fetch-site')) out.set('Sec-Fetch-Site', meta.site);
 
     // UA 声称 Chrome 大版本而 sec-ch-ua 数字对不上 → 以 UA 为准重写(消除版本矛盾)
+    // 品牌白名单:只改 Chromium/Google Chrome/Microsoft Edge 等真实引擎品牌,
+    // GREASE 占位品牌(Not_A Brand/Not(A:Brand 等,版本必≠主版本且随机序排列)
+    // 原样保留 —— g 全局替换会把 GREASE 抬成主版本,产出真实浏览器从不发的品牌列表
     const ch = out.get('sec-ch-ua');
     const uaMajor = ua.match(/Chrome\/(\d+)/)?.[1];
     if (ch && uaMajor) {
-      const chMajor = ch.match(/v="(\d+)"/)?.[1];
-      if (chMajor && chMajor !== uaMajor) {
-        out.set('Sec-CH-UA', ch.replace(/v="\d+"/g, `v="${uaMajor}"`));
-      }
+      const REAL_BRAND_RE = /((?:"(?:Chromium|Google Chrome|Microsoft Edge)")\s*;\s*v=")(\d+)(")/g;
+      const chMajor = ch.match(REAL_BRAND_RE)?.[0]
+        ? ch.replace(REAL_BRAND_RE, (_m, p1, p2, p3) => p1 + uaMajor + p3)
+        : null;
+      if (chMajor && chMajor !== ch) out.set('Sec-CH-UA', chMajor);
     }
   }
   return out;
@@ -525,20 +529,30 @@ function sanitizeOutgoingHeaders(headers: Headers, target: string): Headers {
 function inferFetchMetadata(
   target: string,
   headers: Headers,
+  method: string,
 ): { dest: string; mode: string; site: string } {
   const t = new URL(target);
   const accept = (headers.get('accept') || '').toLowerCase();
   const referer = headers.get('referer');
   const ext = t.pathname.match(/\.([a-z0-9]+)(?:$|[?#])/i)?.[1]?.toLowerCase() ?? '';
+  const isNavAccept = accept.includes('text/html') || accept.includes('application/xhtml');
+
+  // 方法感知(2026-10-31 workflow 红队修复):
+  // OPTIONS 预检在浏览器固定 empty/cors 且从不带导航语义;
+  // 非 GET/HEAD 无 text/html Accept 按 XHR/API 调用处理,不得产生 navigate
+  if (method === 'OPTIONS') {
+    return { dest: 'empty', mode: 'cors', site: siteFromReferer(referer, t) };
+  }
 
   let dest = 'document';
-  if (ext === 'css' || accept.includes('text/css')) dest = 'style';
+  if (method !== 'GET' && method !== 'HEAD' && !isNavAccept) dest = 'empty';
+  else if (ext === 'css' || accept.includes('text/css')) dest = 'style';
   else if (ext === 'js' || ext === 'mjs') dest = 'script';
   else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'ico'].includes(ext)) dest = 'image';
   else if (['woff', 'woff2', 'ttf', 'otf', 'eot'].includes(ext)) dest = 'font';
   else if (['mp4', 'webm', 'vtt'].includes(ext)) dest = 'video';
   else if (['mp3', 'ogg', 'wav'].includes(ext)) dest = 'audio';
-  else if (accept === '*/*' || accept.includes('application/json') || (!referer && !accept.includes('text/html'))) dest = 'empty';
+  else if (accept === '*/*' || accept.includes('application/json') || (!referer && !isNavAccept)) dest = 'empty';
 
   // 经典 <script> 与样式/图片/字体/媒体走 no-cors;document 是 navigate;其余(empty/api)是 cors
   const mode =
@@ -546,14 +560,15 @@ function inferFetchMetadata(
     : ['style', 'script', 'image', 'font', 'video', 'audio'].includes(dest) ? 'no-cors'
     : 'cors';
 
-  // site 基于改写后的 Referer:目标站自家页面发起 → same-origin;无 Referer(直接导航)→ none
-  let site = 'none';
-  if (referer) {
-    try {
-      site = new URL(referer).host === t.host ? 'same-origin' : 'cross-site';
-    } catch {
-      site = 'cross-site';
-    }
+  return { dest, mode, site: siteFromReferer(referer, t) };
+}
+
+/** site 基于改写后的 Referer:目标站自家页面发起 → same-origin;无 Referer(直接导航)→ none */
+function siteFromReferer(referer: string | null, t: URL): string {
+  if (!referer) return 'none';
+  try {
+    return new URL(referer).host === t.host ? 'same-origin' : 'cross-site';
+  } catch {
+    return 'cross-site';
   }
-  return { dest, mode, site };
 }

@@ -8,8 +8,8 @@ import { handleWebProxy } from '../../src/proxy-web/handler';
 
 const SELF = 'https://your-worker.your-subdomain.workers.dev';
 
-function proxyReq(target: string, headers: Record<string, string>): Request {
-  return new Request(`${SELF}/proxy/${encodeURIComponent(target)}`, { headers });
+function proxyReq(target: string, headers: Record<string, string>, method = 'GET'): Request {
+  return new Request(`${SELF}/proxy/${encodeURIComponent(target)}`, { method, headers });
 }
 
 /** 运行代理并返回发给源站的出站请求头 */
@@ -91,17 +91,87 @@ describe('sanitizeOutgoingHeaders 指纹一致性', () => {
     expect(h.get('sec-fetch-site')).toBe('same-origin'); // Referer 已改写为目标站语境
   });
 
-  it('UA 与 sec-ch-ua 大版本矛盾时以 UA 为准重写 sec-ch-ua', async () => {
+  it('UA 与 sec-ch-ua 大版本矛盾时以真实品牌为准重写, GREASE 品牌原样保留', async () => {
     const h = await outgoingHeaders(
       proxyReq('https://target.com/', {
         'User-Agent': CHROME_UA, // Chrome/142
-        'Sec-CH-UA': '"Chromium";v="99", "Google Chrome";v="99", "Not_A Brand";v="8"', // 矛盾
+        // 真实 Chrome 119+ 品牌序随机, GREASE 项(Not_A Brand;v=8)常排首位——
+        // 旧实现取首个 v= 作基准并 g 全局替换, 会把 GREASE 抬成 v=142,
+        // 产出任何真实 Chrome 都不发的品牌列表(2026-10-31 workflow 红队实测确认)
+        'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="99", "Google Chrome";v="99"',
         'Sec-CH-UA-Mobile': '?0',
         'Sec-CH-UA-Platform': '"macOS"',
       })
     );
-    expect(h.get('sec-ch-ua')).toContain('v="142"');
-    expect(h.get('sec-ch-ua')).not.toContain('v="99"');
+    const ch = h.get('sec-ch-ua')!;
+    expect(ch).toContain('"Chromium";v="142"');
+    expect(ch).toContain('"Google Chrome";v="142"');
+    expect(ch).toContain('"Not_A Brand";v="8"'); // GREASE 不被改写
+    expect(ch).not.toContain('v="99"');
+  });
+
+  it('GREASE 排中间/末位的品牌序同样只改真实品牌', async () => {
+    const h = await outgoingHeaders(
+      proxyReq('https://target.com/', {
+        'User-Agent': CHROME_UA,
+        'Sec-CH-UA': '"Google Chrome";v="140", "Not_A Brand";v="24", "Chromium";v="140"',
+      })
+    );
+    const ch = h.get('sec-ch-ua')!;
+    expect(ch).toContain('"Google Chrome";v="142"');
+    expect(ch).toContain('"Chromium";v="142"');
+    expect(ch).toContain('"Not_A Brand";v="24"'); // 非 8/99/24 之外的真实序值同样保留
+  });
+
+  it('OPTIONS 预检不被补成 navigate(浏览器不可能态;带 Referer 复刻红队 P4b)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq(
+        'https://target.com/api/data',
+        {
+          'User-Agent': CHROME_UA,
+          Origin: SELF,
+          Referer: `${SELF}/proxy/https://target.com/page`, // 页面脚本发起预检必带 Referer
+          'Access-Control-Request-Method': 'POST',
+        },
+        'OPTIONS'
+      )
+    );
+    expect(h.get('sec-fetch-mode')).toBe('cors');
+    expect(h.get('sec-fetch-dest')).toBe('empty');
+  });
+
+  it('POST 且 Accept 不含 text/html 时按 XHR 语境补(带 Referer 复刻红队 probe B)', async () => {
+    const h = await outgoingHeaders(
+      proxyReq(
+        'https://target.com/api/submit',
+        {
+          'User-Agent': CHROME_UA,
+          Referer: `${SELF}/proxy/https://target.com/page`,
+          'Content-Type': 'application/json',
+          // 工具发的裸 POST 无 Accept —— 不得补成导航态
+        },
+        'POST'
+      )
+    );
+    expect(h.get('sec-fetch-mode')).toBe('cors');
+    expect(h.get('sec-fetch-dest')).toBe('empty');
+  });
+
+  it('POST 带 text/html Accept(顶级表单提交)保留 navigate/document', async () => {
+    const h = await outgoingHeaders(
+      proxyReq(
+        'https://target.com/login',
+        {
+          'User-Agent': CHROME_UA,
+          Accept: 'text/html,application/xhtml+xml',
+          Referer: `${SELF}/proxy/https://target.com/login`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        'POST'
+      )
+    );
+    expect(h.get('sec-fetch-mode')).toBe('navigate');
+    expect(h.get('sec-fetch-dest')).toBe('document');
   });
 
   it('非 Chromium UA(Firefox)不补造 sec-ch-ua', async () => {
